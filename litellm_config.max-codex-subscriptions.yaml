@@ -1,0 +1,67 @@
+# LiteLLM gateway for using Claude Max and ChatGPT/Codex subscription models
+# from Claude Code.
+#
+# Claude Code still talks to LiteLLM via the Anthropic Messages-compatible
+# gateway. The model names exposed to Claude Code intentionally start with
+# "claude-" so gateway model discovery can show/select them.
+#
+# ChatGPT provider docs:
+# https://docs.litellm.ai/docs/providers/chatgpt
+
+model_list:
+  # Claude Max / Claude OAuth pass-through.
+  # Keep older Opus aliases available for model diversity and regression checks.
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+
+  # Claude Code 2.1.x built-in picker aliases. Mirror these in LiteLLM so
+  # `/model` selections and internal fallback requests do not 400 at the proxy.
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+
+  # ChatGPT/Codex subscription through LiteLLM's official chatgpt provider.
+  # This is exposed as a Claude-looking alias because Claude Code filters
+  # gateway discovery to Claude/Anthropic-looking model ids. Default to medium;
+  # Claude Code `/effort` can override it per request.
+  - model_name: claude-codex-gpt-5-5
+    model_info:
+      mode: responses
+    litellm_params:
+      model: chatgpt/gpt-5.5
+      reasoning:
+        effort: medium
+
+litellm_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  drop_params: true
+  callbacks:
+    # LiteLLM 1.89.4 routes Anthropic-compatible /v1/messages to Responses
+    # only for the "openai" provider. The official chatgpt/ provider is also
+    # Responses-native, and Claude Code's top-level Anthropic "system" field
+    # must become Responses "instructions" instead of an upstream system
+    # message.
+    - litellm_callbacks.chatgpt_anthropic_messages.proxy_handler_instance
+  model_group_settings:
+    # Forward Claude Code's Max OAuth Authorization header only to Anthropic
+    # model groups. Do not forward it to chatgpt/*; ChatGPT provider injects
+    # its own Bearer token from its device-flow auth file.
+    forward_client_headers_to_llm_api:
+      - claude-opus-4-6
+      - claude-opus-4-7
+      - claude-opus-4-8
+      - claude-sonnet-5
+      - claude-haiku-4-5-20251001

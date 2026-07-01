@@ -1,0 +1,692 @@
+import asyncio
+import json
+import sys
+import unittest
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from litellm_callbacks import chatgpt_anthropic_messages as patch
+
+
+CONFIG_PATH = ROOT / "litellm_config.max-codex-subscriptions.yaml"
+START_SCRIPT_PATH = ROOT / "scripts" / "start-litellm-max-codex-gateway.ps1"
+CLAUDE_CODE_SETTINGS_EXAMPLE_PATH = ROOT / "examples" / "claude-code-settings.json"
+
+
+def load_config() -> dict:
+    return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+class GatewayConfigTests(unittest.TestCase):
+    def test_model_list_is_intentionally_small(self) -> None:
+        config = load_config()
+        model_names = [entry["model_name"] for entry in config["model_list"]]
+
+        self.assertEqual(
+            model_names,
+            [
+                "claude-opus-4-6",
+                "claude-opus-4-7",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+                "claude-codex-gpt-5-5",
+            ],
+        )
+        self.assertNotIn("claude-codex-gpt-5-5-medium", model_names)
+        self.assertNotIn("claude-chatgpt-gpt-5-4", model_names)
+        self.assertNotIn("claude-codex-gpt-5-3-codex", model_names)
+
+    def test_codex_alias_defaults_to_chatgpt_responses_medium(self) -> None:
+        config = load_config()
+        codex = next(
+            entry
+            for entry in config["model_list"]
+            if entry["model_name"] == "claude-codex-gpt-5-5"
+        )
+
+        self.assertEqual(codex["model_info"]["mode"], "responses")
+        self.assertEqual(codex["litellm_params"]["model"], "chatgpt/gpt-5.5")
+        self.assertEqual(
+            codex["litellm_params"]["reasoning"],
+            {"effort": "medium"},
+        )
+
+    def test_client_authorization_header_is_not_forwarded_to_chatgpt(self) -> None:
+        config = load_config()
+        forwarded = config["litellm_settings"]["model_group_settings"][
+            "forward_client_headers_to_llm_api"
+        ]
+
+        self.assertEqual(
+            forwarded,
+            [
+                "claude-opus-4-6",
+                "claude-opus-4-7",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+            ],
+        )
+        self.assertNotIn("claude-codex-gpt-5-5", forwarded)
+
+    def test_non_claude_gateway_models_are_derived_from_config(self) -> None:
+        config = load_config()
+
+        self.assertEqual(
+            patch._non_claude_model_names_from_config(config),
+            ("claude-codex-gpt-5-5",),
+        )
+
+    def test_all_non_claude_gateway_models_are_listed(self) -> None:
+        config = {
+            "model_list": [
+                {
+                    "model_name": "claude-opus-4-8",
+                    "litellm_params": {"model": "anthropic/claude-opus-4-8"},
+                },
+                {
+                    "model_name": "claude-codex-gpt-5-5",
+                    "litellm_params": {"model": "chatgpt/gpt-5.5"},
+                },
+                {
+                    "model_name": "claude-openai-gpt-5",
+                    "litellm_params": {"model": "openai/gpt-5"},
+                },
+            ],
+        }
+
+        self.assertEqual(
+            patch._non_claude_model_names_from_config(config),
+            ("claude-codex-gpt-5-5", "claude-openai-gpt-5"),
+        )
+
+
+class StartupScriptTests(unittest.TestCase):
+    def test_start_script_lists_required_claude_client_env(self) -> None:
+        script = START_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        for expected in [
+            "ANTHROPIC_BASE_URL=http://localhost:$Port",
+            "ANTHROPIC_MODEL=claude-codex-gpt-5-5",
+            "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer $MasterKey",
+            "$env:CLAUDE_LITELLM_CONFIG = $ConfigPath",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION=claude-codex-gpt-5-5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking",
+        ]:
+            self.assertIn(expected, script)
+
+        self.assertNotIn("claude-codex-gpt-5-5-medium", script)
+
+
+class ClaudeCodeSettingsExampleTests(unittest.TestCase):
+    def test_example_settings_json_matches_gateway_aliases(self) -> None:
+        settings = json.loads(
+            CLAUDE_CODE_SETTINGS_EXAMPLE_PATH.read_text(encoding="utf-8")
+        )
+        env = settings["env"]
+
+        self.assertEqual(settings["model"], "claude-codex-gpt-5-5")
+        self.assertEqual(settings["effortLevel"], "medium")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4000")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "claude-codex-gpt-5-5")
+        self.assertEqual(
+            env["ANTHROPIC_CUSTOM_HEADERS"],
+            "x-litellm-api-key: Bearer litellm-local-master-key",
+        )
+        self.assertEqual(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-4-8")
+        self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5")
+        self.assertEqual(
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "claude-haiku-4-5-20251001",
+        )
+        self.assertEqual(
+            env["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+            "claude-codex-gpt-5-5",
+        )
+
+
+class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
+    def test_chatgpt_provider_uses_responses_route(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+        self.assertTrue(patch._enable_chatgpt_responses_route())
+        self.assertIn("chatgpt", handler._RESPONSES_API_PROVIDERS)
+        self.assertTrue(handler._should_route_to_responses_api("chatgpt"))
+
+    def test_system_prompt_becomes_responses_instructions(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="gpt-5.5",
+            system="SYSTEM TEXT",
+            stream=False,
+            extra_kwargs={"custom_llm_provider": "chatgpt"},
+        )
+
+        self.assertEqual(kwargs["instructions"], "SYSTEM TEXT")
+        self.assertFalse(
+            any(
+                isinstance(item, dict) and item.get("role") == "system"
+                for item in kwargs["input"]
+            )
+        )
+
+    def test_max_effort_maps_to_xhigh_for_codex_alias(self) -> None:
+        data = {
+            "model": "claude-codex-gpt-5-5",
+            "output_config": {"effort": "max"},
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["output_config"]["effort"], "xhigh")
+        self.assertEqual(data["thinking"], {"type": "adaptive"})
+        self.assertEqual(data["reasoning"], {"effort": "xhigh"})
+
+    def test_config_default_medium_reaches_responses_kwargs(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="gpt-5.5",
+            stream=False,
+            extra_kwargs={
+                "custom_llm_provider": "chatgpt",
+                "reasoning": {"effort": "medium"},
+            },
+        )
+
+        self.assertEqual(kwargs["reasoning"], {"effort": "medium"})
+
+    def test_session_effort_overrides_config_default(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="gpt-5.5",
+            output_config={"effort": "low"},
+            thinking={"type": "adaptive"},
+            stream=False,
+            extra_kwargs={
+                "custom_llm_provider": "chatgpt",
+                "reasoning": {"effort": "medium"},
+            },
+        )
+
+        self.assertEqual(kwargs["reasoning"], {"effort": "low"})
+
+    def test_chatgpt_effort_normalizer_keeps_xhigh_and_maps_max(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.utils import (
+            normalize_reasoning_effort_value,
+        )
+
+        patch._patch_chatgpt_effort_normalization()
+
+        self.assertEqual(
+            normalize_reasoning_effort_value("xhigh", "gpt-5.5", "chatgpt"),
+            "xhigh",
+        )
+        self.assertEqual(
+            normalize_reasoning_effort_value("max", "gpt-5.5", "chatgpt"),
+            "xhigh",
+        )
+        self.assertEqual(
+            normalize_reasoning_effort_value("minimal", "gpt-5.5", "chatgpt"),
+            "low",
+        )
+
+    def test_claude_model_effort_is_not_modified_by_codex_hook(self) -> None:
+        data = {
+            "model": "claude-opus-4-8",
+            "output_config": {"effort": "max"},
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["output_config"], {"effort": "max"})
+        self.assertIn("claude-codex-gpt-5-5", data["system"])
+
+    def test_system_prompt_gets_non_claude_gateway_model_note(self) -> None:
+        data = {
+            "model": "claude-opus-4-8",
+            "system": "BASE SYSTEM",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertTrue(data["system"].startswith("BASE SYSTEM\n\n"))
+        self.assertIn("claude-codex-gpt-5-5", data["system"])
+        self.assertIn("non-Claude model aliases", data["system"])
+        self.assertIn("/model <alias>", data["system"])
+        self.assertEqual(
+            data["system"].count("<gateway_available_non_claude_models>"),
+            1,
+        )
+        self.assertEqual(
+            data["system"].count("</gateway_available_non_claude_models>"),
+            1,
+        )
+
+    def test_block_system_prompt_gets_non_claude_gateway_model_note(self) -> None:
+        data = {
+            "model": "claude-opus-4-8",
+            "system": [{"type": "text", "text": "BASE SYSTEM"}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["system"][0], {"type": "text", "text": "BASE SYSTEM"})
+        self.assertEqual(data["system"][1]["type"], "text")
+        self.assertIn("claude-codex-gpt-5-5", data["system"][1]["text"])
+
+    def test_anthropic_messages_logging_accepts_responses_api_response(self) -> None:
+        from litellm.litellm_core_utils.litellm_logging import Logging
+        from litellm.types.llms.openai import ResponsesAPIResponse
+
+        patch._patch_anthropic_messages_response_logging()
+        response = ResponsesAPIResponse.model_construct(
+            id="resp_test",
+            object="response",
+            created_at=0,
+            model="gpt-5.5",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        logged = Logging._handle_anthropic_messages_response_logging(
+            object(),
+            response,
+        )
+
+        self.assertIs(logged, response)
+
+    def test_removed_codex_aliases_are_not_treated_as_chatgpt_aliases(self) -> None:
+        self.assertFalse(
+            patch._is_chatgpt_request({"model": "claude-codex-gpt-5-5-medium"})
+        )
+        self.assertFalse(
+            patch._is_chatgpt_request({"model": "claude-chatgpt-gpt-5-4"})
+        )
+
+    def test_empty_thinking_blocks_are_removed_but_valid_blocks_remain(self) -> None:
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": "ok"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "valid",
+                        "signature": "sig",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "redacted_thinking"}],
+            },
+        ]
+
+        cleaned = patch._strip_empty_thinking_blocks_from_messages(messages)
+
+        self.assertEqual(
+            cleaned,
+            [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "valid",
+                            "signature": "sig",
+                        }
+                    ],
+                },
+            ],
+        )
+
+    def test_empty_web_search_domain_filters_are_removed(self) -> None:
+        data = {
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "blocked_domains": [],
+                    "allowed_domains": [],
+                    "max_uses": 5,
+                },
+                {
+                    "type": "web_search_20260318",
+                    "name": "restricted_web_search",
+                    "blocked_domains": ["example.com"],
+                },
+                {
+                    "type": "custom_tool",
+                    "name": "custom",
+                    "input_schema": {"type": "object"},
+                    "blocked_domains": [],
+                },
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertNotIn("blocked_domains", data["tools"][0])
+        self.assertNotIn("allowed_domains", data["tools"][0])
+        self.assertEqual(data["tools"][0]["max_uses"], 5)
+        self.assertEqual(data["tools"][1]["blocked_domains"], ["example.com"])
+        self.assertEqual(data["tools"][2]["blocked_domains"], [])
+
+    def test_anthropic_web_search_tool_maps_to_openai_web_search_for_codex(
+        self,
+    ) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        data = {
+            "model": "claude-codex-gpt-5-5",
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "allowed_domains": ["docs.python.org"],
+                    "blocked_domains": ["example.com"],
+                    "max_uses": 3,
+                    "user_location": {
+                        "type": "approximate",
+                        "city": "Tokyo",
+                        "country": "JP",
+                        "ignored": "value",
+                    },
+                }
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=data["messages"],
+            model="gpt-5.5",
+            tools=data["tools"],
+            stream=False,
+            extra_kwargs={
+                "custom_llm_provider": "chatgpt",
+                "include": data["include"],
+            },
+        )
+
+        self.assertEqual(
+            kwargs["tools"],
+            [
+                {
+                    "type": "web_search",
+                    "filters": {
+                        "allowed_domains": ["docs.python.org"],
+                        "blocked_domains": ["example.com"],
+                    },
+                    "user_location": {
+                        "type": "approximate",
+                        "city": "Tokyo",
+                        "country": "JP",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(kwargs["include"], ["web_search_call.action.sources"])
+        self.assertNotIn("max_uses", kwargs["tools"][0])
+
+    def test_openai_web_search_response_maps_back_to_anthropic_blocks(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+            LiteLLMAnthropicToResponsesAPIAdapter,
+        )
+        from litellm.types.llms.openai import ResponsesAPIResponse
+
+        response = ResponsesAPIResponse.model_construct(
+            id="resp_web_search",
+            object="response",
+            created_at=0,
+            model="gpt-5.5",
+            status="completed",
+            output=[
+                {
+                    "type": "web_search_call",
+                    "id": "ws_123",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "Claude Shannon birth date",
+                        "sources": [
+                            {
+                                "type": "url",
+                                "url": "https://example.com/shannon",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Claude Shannon was born in 1916.",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://example.com/shannon",
+                                    "title": "Claude Shannon",
+                                    "start_index": 0,
+                                    "end_index": 14,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        translated = LiteLLMAnthropicToResponsesAPIAdapter().translate_response(
+            response
+        )
+
+        self.assertEqual(translated["content"][0]["type"], "server_tool_use")
+        self.assertEqual(translated["content"][0]["id"], "ws_123")
+        self.assertEqual(translated["content"][0]["name"], "web_search")
+        self.assertEqual(
+            translated["content"][0]["input"],
+            {"query": "Claude Shannon birth date"},
+        )
+        self.assertEqual(translated["content"][1]["type"], "web_search_tool_result")
+        self.assertEqual(translated["content"][1]["tool_use_id"], "ws_123")
+        self.assertEqual(
+            translated["content"][1]["content"][0],
+            {
+                "type": "web_search_result",
+                "url": "https://example.com/shannon",
+                "title": "Claude Shannon",
+                "encrypted_content": "",
+            },
+        )
+        self.assertEqual(translated["content"][2]["type"], "text")
+        self.assertEqual(
+            translated["content"][2]["citations"][0],
+            {
+                "type": "web_search_result_location",
+                "url": "https://example.com/shannon",
+                "title": "Claude Shannon",
+                "encrypted_index": "",
+                "cited_text": "Claude Shannon",
+            },
+        )
+        self.assertEqual(
+            translated["usage"]["server_tool_use"],
+            {"web_search_requests": 1},
+        )
+
+    def test_streaming_openai_web_search_response_maps_to_anthropic_events(
+        self,
+    ) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (
+            AnthropicResponsesStreamWrapper,
+        )
+
+        wrapper = AnthropicResponsesStreamWrapper(
+            responses_stream=[],
+            model="gpt-5.5",
+        )
+        wrapper._process_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws_123",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "Claude Shannon birth date",
+                        "sources": [
+                            {
+                                "type": "url",
+                                "url": "https://example.com/shannon",
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+        wrapper._process_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "web_search_call",
+                            "id": "ws_123",
+                            "status": "completed",
+                        }
+                    ],
+                },
+            }
+        )
+
+        chunks = list(wrapper._chunk_queue)
+
+        self.assertEqual(
+            chunks[0]["content_block"],
+            {
+                "type": "server_tool_use",
+                "id": "ws_123",
+                "name": "web_search",
+                "input": {"query": "Claude Shannon birth date"},
+            },
+        )
+        self.assertEqual(chunks[2]["content_block"]["type"], "web_search_tool_result")
+        self.assertEqual(chunks[2]["content_block"]["tool_use_id"], "ws_123")
+        message_delta = next(
+            chunk for chunk in chunks if chunk.get("type") == "message_delta"
+        )
+        self.assertEqual(
+            message_delta["usage"]["server_tool_use"],
+            {"web_search_requests": 1},
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
