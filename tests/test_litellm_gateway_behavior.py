@@ -136,6 +136,7 @@ class StartupScriptTests(unittest.TestCase):
             "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
             "$env:CLAUDE_LITELLM_CONFIG = $ConfigPath",
             "litellm --config $ConfigPath --host $BindHost --port $Port",
+            "exit $LASTEXITCODE",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
             "claude-opus-4-6",
             "claude-opus-4-7",

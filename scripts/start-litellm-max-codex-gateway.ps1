@@ -70,3 +70,4 @@ Write-Host "  claude-opus-4-6"
 Write-Host "  claude-opus-4-7"
 
 litellm --config $ConfigPath --host $BindHost --port $Port
+exit $LASTEXITCODE

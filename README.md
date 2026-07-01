@@ -66,10 +66,12 @@ uv tool upgrade litellm
 ## Gateway 起動
 
 ```powershell
-$env:LITELLM_MASTER_KEY = "sk-local-" + [guid]::NewGuid().ToString("N")
+$env:LITELLM_MASTER_KEY = "sk-local-<stable-secret>"
 $env:LITELLM_MASTER_KEY
 .\scripts\start-litellm-max-codex-gateway.ps1 -Port 4000
 ```
+
+`<stable-secret>` は一度だけ作り、gateway 起動時の `LITELLM_MASTER_KEY` と `~/.claude/settings.json` の `ANTHROPIC_CUSTOM_HEADERS` で同じ値を使います。値を変えた場合は Claude Code 側の設定も同じ値に更新してください。
 
 起動スクリプトは以下を設定します。
 
@@ -91,7 +93,7 @@ gateway は既定で `127.0.0.1:4000` にだけ bind します。別 host に bi
 ## Claude Code 側設定
 
 手元の `~/.claude/settings.json` の設定例は [examples/claude-code-settings.json](examples/claude-code-settings.json) にあります。
-普段使いでは、ここで使う環境変数は shell profile ではなく `~/.claude/settings.json` の `env` に書いておくのがおすすめです。`<LITELLM_MASTER_KEY>` は起動時に使った `sk-` 始まりの値へ置き換えてください。Claude Code の新規セッションごとに同じ gateway 設定が読み込まれ、LiteLLM の master key と `ANTHROPIC_CUSTOM_HEADERS` のずれも起きにくくなります。
+普段使いでは、ここで使う環境変数は shell profile ではなく `~/.claude/settings.json` の `env` に書いておくのがおすすめです。`<LITELLM_MASTER_KEY>` は gateway 起動時に使う stable secret と同じ値へ置き換えてください。Claude Code の新規セッションごとに同じ gateway 設定が読み込まれ、LiteLLM の master key と `ANTHROPIC_CUSTOM_HEADERS` のずれも起きにくくなります。
 
 PowerShell で一時的に試すなら、最小形は次の通りです。
 
