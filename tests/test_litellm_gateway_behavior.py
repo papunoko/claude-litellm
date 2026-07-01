@@ -5,6 +5,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from typing import Any, ClassVar
 
 import yaml
 
@@ -130,7 +131,7 @@ class StartupScriptTests(unittest.TestCase):
         for expected in [
             "ANTHROPIC_BASE_URL=http://localhost:$Port",
             "ANTHROPIC_MODEL=claude-codex-gpt-5-5",
-            "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer $MasterKey",
+            "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
             "$env:CLAUDE_LITELLM_CONFIG = $ConfigPath",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
             "claude-opus-4-6",
@@ -143,6 +144,10 @@ class StartupScriptTests(unittest.TestCase):
         ]:
             self.assertIn(expected, script)
 
+        self.assertNotIn(
+            "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer $MasterKey",
+            script,
+        )
         self.assertNotIn("claude-codex-gpt-5-5-medium", script)
 
 
@@ -182,9 +187,9 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
 
 
 class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
-    patch = None
-    litellm_patch_state: list[tuple[object, str, object]] = []
-    env_state: dict[str, str | None] = {}
+    patch: ClassVar[Any | None] = None
+    litellm_patch_state: ClassVar[list[tuple[object, str, object]]] = []
+    env_state: ClassVar[dict[str, str | None]] = {}
 
     @classmethod
     def setUpClass(cls) -> None:

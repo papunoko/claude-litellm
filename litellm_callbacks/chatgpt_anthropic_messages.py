@@ -34,7 +34,7 @@ def _enable_chatgpt_responses_route() -> bool:
         from litellm.llms.anthropic.experimental_pass_through.messages import (
             handler as messages_handler,
         )
-    except Exception:
+    except ImportError:
         return False
 
     providers = getattr(messages_handler, "_RESPONSES_API_PROVIDERS", frozenset())
@@ -49,7 +49,7 @@ def _enable_chatgpt_responses_route() -> bool:
 def _patch_chatgpt_effort_normalization() -> bool:
     try:
         from litellm.llms.anthropic.experimental_pass_through import utils
-    except Exception:
+    except ImportError:
         return False
 
     if getattr(utils, "_claude_litellm_chatgpt_effort_patch", False):
@@ -88,7 +88,7 @@ def _patch_anthropic_messages_response_logging() -> bool:
     try:
         from litellm.litellm_core_utils import litellm_logging
         from litellm.types.llms.openai import ResponsesAPIResponse
-    except Exception:
+    except ImportError:
         return False
 
     logging_cls = getattr(litellm_logging, "Logging", None)
@@ -486,7 +486,7 @@ def _patch_responses_web_search_translation() -> bool:
             streaming_iterator,
             transformation,
         )
-    except Exception:
+    except ImportError:
         return False
 
     adapter_cls = getattr(
@@ -679,9 +679,12 @@ def _non_claude_model_names_from_config(config: dict[str, Any]) -> tuple[str, ..
 def _read_non_claude_model_names_from_config(path: Path) -> tuple[str, ...]:
     try:
         import yaml
+    except ImportError:
+        return ()
 
+    try:
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return ()
 
     if not isinstance(config, dict):
