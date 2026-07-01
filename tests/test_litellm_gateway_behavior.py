@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -14,9 +15,14 @@ sys.path.insert(0, str(ROOT))
 
 CONFIG_PATH = ROOT / "litellm_config.max-codex-subscriptions.yaml"
 START_SCRIPT_PATH = ROOT / "scripts" / "start-litellm-max-codex-gateway.ps1"
+TEST_SCRIPT_PATH = ROOT / "scripts" / "test-litellm-max-codex-gateway.ps1"
 CLAUDE_CODE_SETTINGS_EXAMPLE_PATH = ROOT / "examples" / "claude-code-settings.json"
 PATCH_MODULE_NAME = "litellm_callbacks.chatgpt_anthropic_messages"
 MISSING = object()
+PATCH_ENV_VARS = (
+    "CLAUDE_LITELLM_NON_CLAUDE_MODELS",
+    "CLAUDE_LITELLM_CONFIG",
+)
 
 
 def capture_litellm_patch_state() -> list[tuple[object, str, object]]:
@@ -140,6 +146,14 @@ class StartupScriptTests(unittest.TestCase):
         self.assertNotIn("claude-codex-gpt-5-5-medium", script)
 
 
+class TestScriptTests(unittest.TestCase):
+    def test_test_script_forwards_unittest_exit_code(self) -> None:
+        script = TEST_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("$TestExitCode = $LASTEXITCODE", script)
+        self.assertIn("exit $TestExitCode", script)
+
+
 class ClaudeCodeSettingsExampleTests(unittest.TestCase):
     def test_example_settings_json_matches_gateway_aliases(self) -> None:
         settings = json.loads(
@@ -170,10 +184,15 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
 class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
     patch = None
     litellm_patch_state: list[tuple[object, str, object]] = []
+    env_state: dict[str, str | None] = {}
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.litellm_patch_state = capture_litellm_patch_state()
+        cls.env_state = {name: os.environ.get(name) for name in PATCH_ENV_VARS}
+        for name in PATCH_ENV_VARS:
+            os.environ.pop(name, None)
+
         sys.modules.pop(PATCH_MODULE_NAME, None)
         package = sys.modules.get("litellm_callbacks")
         if package is not None:
@@ -184,6 +203,11 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         restore_litellm_patch_state(cls.litellm_patch_state)
+        for name, value in cls.env_state.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         cls.patch = None
 
     def test_non_claude_gateway_models_are_derived_from_config(self) -> None:
