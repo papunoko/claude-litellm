@@ -13,6 +13,7 @@ Claude Code は Anthropic Messages 互換 endpoint として `http://localhost:4
 claude-opus-4-6                 -> anthropic/claude-opus-4-6
 claude-opus-4-7                 -> anthropic/claude-opus-4-7
 claude-opus-4-8                 -> anthropic/claude-opus-4-8
+claude-fable-5                  -> anthropic/claude-fable-5
 claude-sonnet-5                 -> anthropic/claude-sonnet-5
 claude-haiku-4-5-20251001       -> anthropic/claude-haiku-4-5-20251001
 claude-codex-gpt-5-5            -> chatgpt/gpt-5.5, reasoning.effort=medium
@@ -120,7 +121,7 @@ claude
 
 Claude Code 内では `/model` で Claude alias と Codex alias を切り替えます。Codex alias の既定 effort は `medium` です。必要な時だけ `/effort high` や `/effort max` を使ってください。gateway は `/effort max` を OpenAI Responses の `reasoning.effort=xhigh` に読み替えます。
 
-`claude-opus-4-6` と `claude-opus-4-7` は、`ANTHROPIC_DEFAULT_OPUS_MODEL` にはしません。既定 Opus は `claude-opus-4-8` のままにし、モデル多様性や回帰確認が必要な時に gateway model discovery / `/model claude-opus-4-6` / `/model claude-opus-4-7` で選びます。
+`claude-opus-4-6`、`claude-opus-4-7`、`claude-fable-5` は、`ANTHROPIC_DEFAULT_OPUS_MODEL` にはしません。既定 Opus は `claude-opus-4-8` のままにし、モデル多様性や回帰確認が必要な時に gateway model discovery / `/model claude-opus-4-6` / `/model claude-opus-4-7` / `/model claude-fable-5` で選びます。
 
 ## callback がやっていること
 

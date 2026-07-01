@@ -23,6 +23,10 @@ model_list:
     litellm_params:
       model: anthropic/claude-opus-4-8
 
+  - model_name: claude-fable-5
+    litellm_params:
+      model: anthropic/claude-fable-5
+
   # Claude Code 2.1.x built-in picker aliases. Mirror these in LiteLLM so
   # `/model` selections and internal fallback requests do not 400 at the proxy.
   - model_name: claude-sonnet-5
@@ -63,5 +67,6 @@ litellm_settings:
       - claude-opus-4-6
       - claude-opus-4-7
       - claude-opus-4-8
+      - claude-fable-5
       - claude-sonnet-5
       - claude-haiku-4-5-20251001

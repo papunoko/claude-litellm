@@ -68,6 +68,7 @@ Write-Host ""
 Write-Host "[additional gateway discovery aliases]"
 Write-Host "  claude-opus-4-6"
 Write-Host "  claude-opus-4-7"
+Write-Host "  claude-fable-5"
 
 litellm --config $ConfigPath --host $BindHost --port $Port
 exit $LASTEXITCODE
