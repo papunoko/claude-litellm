@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import json
 import sys
 import unittest
@@ -10,12 +11,52 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from litellm_callbacks import chatgpt_anthropic_messages as patch
-
 
 CONFIG_PATH = ROOT / "litellm_config.max-codex-subscriptions.yaml"
 START_SCRIPT_PATH = ROOT / "scripts" / "start-litellm-max-codex-gateway.ps1"
 CLAUDE_CODE_SETTINGS_EXAMPLE_PATH = ROOT / "examples" / "claude-code-settings.json"
+PATCH_MODULE_NAME = "litellm_callbacks.chatgpt_anthropic_messages"
+MISSING = object()
+
+
+def capture_litellm_patch_state() -> list[tuple[object, str, object]]:
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    from litellm.llms.anthropic.experimental_pass_through import utils
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+    from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (
+        AnthropicResponsesStreamWrapper,
+    )
+    from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+        LiteLLMAnthropicToResponsesAPIAdapter,
+    )
+
+    attrs = [
+        (handler, "_RESPONSES_API_PROVIDERS"),
+        (utils, "normalize_reasoning_effort_value"),
+        (utils, "_claude_litellm_chatgpt_effort_patch"),
+        (Logging, "_handle_anthropic_messages_response_logging"),
+        (Logging, "_claude_litellm_chatgpt_logging_patch"),
+        (LiteLLMAnthropicToResponsesAPIAdapter, "translate_tools_to_responses_api"),
+        (LiteLLMAnthropicToResponsesAPIAdapter, "translate_response"),
+        (LiteLLMAnthropicToResponsesAPIAdapter, "_claude_litellm_web_search_patch"),
+        (AnthropicResponsesStreamWrapper, "_process_event"),
+        (AnthropicResponsesStreamWrapper, "_claude_litellm_web_search_patch"),
+    ]
+    return [(obj, name, getattr(obj, name, MISSING)) for obj, name in attrs]
+
+
+def restore_litellm_patch_state(state: list[tuple[object, str, object]]) -> None:
+    for obj, name, value in state:
+        if value is MISSING:
+            if hasattr(obj, name):
+                delattr(obj, name)
+        else:
+            setattr(obj, name, value)
+
+    sys.modules.pop(PATCH_MODULE_NAME, None)
+    package = sys.modules.get("litellm_callbacks")
+    if package is not None:
+        package.__dict__.pop("chatgpt_anthropic_messages", None)
 
 
 def load_config() -> dict:
@@ -75,37 +116,6 @@ class GatewayConfigTests(unittest.TestCase):
         )
         self.assertNotIn("claude-codex-gpt-5-5", forwarded)
 
-    def test_non_claude_gateway_models_are_derived_from_config(self) -> None:
-        config = load_config()
-
-        self.assertEqual(
-            patch._non_claude_model_names_from_config(config),
-            ("claude-codex-gpt-5-5",),
-        )
-
-    def test_all_non_claude_gateway_models_are_listed(self) -> None:
-        config = {
-            "model_list": [
-                {
-                    "model_name": "claude-opus-4-8",
-                    "litellm_params": {"model": "anthropic/claude-opus-4-8"},
-                },
-                {
-                    "model_name": "claude-codex-gpt-5-5",
-                    "litellm_params": {"model": "chatgpt/gpt-5.5"},
-                },
-                {
-                    "model_name": "claude-openai-gpt-5",
-                    "litellm_params": {"model": "openai/gpt-5"},
-                },
-            ],
-        }
-
-        self.assertEqual(
-            patch._non_claude_model_names_from_config(config),
-            ("claude-codex-gpt-5-5", "claude-openai-gpt-5"),
-        )
-
 
 class StartupScriptTests(unittest.TestCase):
     def test_start_script_lists_required_claude_client_env(self) -> None:
@@ -158,12 +168,82 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
 
 
 class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
+    patch = None
+    litellm_patch_state: list[tuple[object, str, object]] = []
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.litellm_patch_state = capture_litellm_patch_state()
+        sys.modules.pop(PATCH_MODULE_NAME, None)
+        package = sys.modules.get("litellm_callbacks")
+        if package is not None:
+            package.__dict__.pop("chatgpt_anthropic_messages", None)
+
+        cls.patch = importlib.import_module(PATCH_MODULE_NAME)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        restore_litellm_patch_state(cls.litellm_patch_state)
+        cls.patch = None
+
+    def test_non_claude_gateway_models_are_derived_from_config(self) -> None:
+        config = load_config()
+
+        self.assertEqual(
+            self.patch._non_claude_model_names_from_config(config),
+            ("claude-codex-gpt-5-5",),
+        )
+
+    def test_all_non_claude_gateway_models_are_listed(self) -> None:
+        config = {
+            "model_list": [
+                {
+                    "model_name": "claude-opus-4-8",
+                    "litellm_params": {"model": "anthropic/claude-opus-4-8"},
+                },
+                {
+                    "model_name": "claude-codex-gpt-5-5",
+                    "litellm_params": {"model": "chatgpt/gpt-5.5"},
+                },
+                {
+                    "model_name": "claude-openai-gpt-5",
+                    "litellm_params": {"model": "openai/gpt-5"},
+                },
+            ],
+        }
+
+        self.assertEqual(
+            self.patch._non_claude_model_names_from_config(config),
+            ("claude-codex-gpt-5-5", "claude-openai-gpt-5"),
+        )
+
     def test_chatgpt_provider_uses_responses_route(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.messages import handler
 
-        self.assertTrue(patch._enable_chatgpt_responses_route())
+        self.assertTrue(self.patch._enable_chatgpt_responses_route())
         self.assertIn("chatgpt", handler._RESPONSES_API_PROVIDERS)
         self.assertTrue(handler._should_route_to_responses_api("chatgpt"))
+
+    def test_patch_initialization_fails_fast_when_a_patch_cannot_apply(self) -> None:
+        original = self.patch._patch_responses_web_search_translation
+        self.patch._patch_responses_web_search_translation = lambda: False
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Responses web search translation",
+            ):
+                self.patch._enable_patches()
+        finally:
+            self.patch._patch_responses_web_search_translation = original
+            self.patch._enable_patches()
+
+    def test_domain_filter_lists_are_trimmed_and_compacted(self) -> None:
+        self.assertEqual(
+            self.patch._non_empty_string_list(
+                [" docs.python.org ", "   ", "", "example.com", 42]
+            ),
+            ["docs.python.org", "example.com"],
+        )
 
     def test_system_prompt_becomes_responses_instructions(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
@@ -194,7 +274,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -249,7 +329,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             normalize_reasoning_effort_value,
         )
 
-        patch._patch_chatgpt_effort_normalization()
+        self.patch._patch_chatgpt_effort_normalization()
 
         self.assertEqual(
             normalize_reasoning_effort_value("xhigh", "gpt-5.5", "chatgpt"),
@@ -271,7 +351,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -290,7 +370,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -298,7 +378,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             )
         )
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -327,7 +407,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -343,7 +423,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         from litellm.litellm_core_utils.litellm_logging import Logging
         from litellm.types.llms.openai import ResponsesAPIResponse
 
-        patch._patch_anthropic_messages_response_logging()
+        self.patch._patch_anthropic_messages_response_logging()
         response = ResponsesAPIResponse.model_construct(
             id="resp_test",
             object="response",
@@ -364,10 +444,12 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
 
     def test_removed_codex_aliases_are_not_treated_as_chatgpt_aliases(self) -> None:
         self.assertFalse(
-            patch._is_chatgpt_request({"model": "claude-codex-gpt-5-5-medium"})
+            self.patch._is_chatgpt_request(
+                {"model": "claude-codex-gpt-5-5-medium"}
+            )
         )
         self.assertFalse(
-            patch._is_chatgpt_request({"model": "claude-chatgpt-gpt-5-4"})
+            self.patch._is_chatgpt_request({"model": "claude-chatgpt-gpt-5-4"})
         )
 
     def test_empty_thinking_blocks_are_removed_but_valid_blocks_remain(self) -> None:
@@ -396,7 +478,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             },
         ]
 
-        cleaned = patch._strip_empty_thinking_blocks_from_messages(messages)
+        cleaned = self.patch._strip_empty_thinking_blocks_from_messages(messages)
 
         self.assertEqual(
             cleaned,
@@ -433,7 +515,8 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                 {
                     "type": "web_search_20260318",
                     "name": "restricted_web_search",
-                    "blocked_domains": ["example.com"],
+                    "allowed_domains": [" docs.example.com ", "   "],
+                    "blocked_domains": [" example.com ", "", "   "],
                 },
                 {
                     "type": "custom_tool",
@@ -446,7 +529,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,
@@ -458,6 +541,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         self.assertNotIn("allowed_domains", data["tools"][0])
         self.assertEqual(data["tools"][0]["max_uses"], 5)
         self.assertEqual(data["tools"][1]["blocked_domains"], ["example.com"])
+        self.assertEqual(data["tools"][1]["allowed_domains"], ["docs.example.com"])
         self.assertEqual(data["tools"][2]["blocked_domains"], [])
 
     def test_anthropic_web_search_tool_maps_to_openai_web_search_for_codex(
@@ -473,8 +557,8 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                 {
                     "type": "web_search_20250305",
                     "name": "web_search",
-                    "allowed_domains": ["docs.python.org"],
-                    "blocked_domains": ["example.com"],
+                    "allowed_domains": [" docs.python.org ", "   "],
+                    "blocked_domains": [" example.com ", ""],
                     "max_uses": 3,
                     "user_location": {
                         "type": "approximate",
@@ -488,7 +572,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         }
 
         asyncio.run(
-            patch.proxy_handler_instance.async_pre_call_hook(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
                 None,
                 None,
                 data,

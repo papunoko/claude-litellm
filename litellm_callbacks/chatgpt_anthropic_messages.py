@@ -130,7 +130,11 @@ def _non_empty_string_list(value: Any) -> list[str] | None:
     if not isinstance(value, list):
         return None
 
-    items = [item for item in value if isinstance(item, str) and item]
+    items = [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ]
     return items or None
 
 
@@ -584,14 +588,29 @@ def _patch_responses_web_search_translation() -> bool:
 
 
 def _enable_patches() -> bool:
-    route_enabled = _enable_chatgpt_responses_route()
-    effort_enabled = _patch_chatgpt_effort_normalization()
-    logging_enabled = _patch_anthropic_messages_response_logging()
-    web_search_enabled = _patch_responses_web_search_translation()
-    return route_enabled and effort_enabled and logging_enabled and web_search_enabled
+    failed = [
+        name
+        for name, enable in (
+            ("chatgpt Responses route", _enable_chatgpt_responses_route),
+            ("chatgpt effort normalization", _patch_chatgpt_effort_normalization),
+            (
+                "Anthropic messages response logging",
+                _patch_anthropic_messages_response_logging,
+            ),
+            (
+                "Responses web search translation",
+                _patch_responses_web_search_translation,
+            ),
+        )
+        if not enable()
+    ]
+    if failed:
+        raise RuntimeError(
+            "Failed to enable LiteLLM compatibility patch(es): "
+            + ", ".join(failed)
+        )
 
-
-_enable_patches()
+    return True
 
 
 def _is_empty_thinking_block(block: Any) -> bool:
@@ -811,8 +830,12 @@ def _strip_empty_web_search_domain_filters_from_tools(tools: Iterable[Any]) -> l
         filtered_tool = dict(tool)
         for key in _WEB_SEARCH_DOMAIN_FILTER_KEYS:
             value = filtered_tool.get(key)
-            if isinstance(value, list) and not value:
-                filtered_tool.pop(key, None)
+            if isinstance(value, list):
+                values = _non_empty_string_list(value)
+                if values:
+                    filtered_tool[key] = values
+                else:
+                    filtered_tool.pop(key, None)
 
         cleaned.append(filtered_tool)
 
@@ -929,11 +952,10 @@ def _apply_chatgpt_effort(data: dict, model: str | None = None) -> None:
 class ChatGPTAnthropicMessagesPatch(CustomLogger):
     def __init__(self) -> None:
         self.enabled = _enable_patches()
-        if self.enabled:
-            print(
-                "[litellm] enabled Anthropic /v1/messages -> Responses routing "
-                "and effort mapping for chatgpt provider"
-            )
+        print(
+            "[litellm] enabled Anthropic /v1/messages -> Responses routing "
+            "and effort mapping for chatgpt provider"
+        )
 
     async def async_pre_request_hook(
         self,
