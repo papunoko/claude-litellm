@@ -1,0 +1,26 @@
+# Credentials and local environment
+.env
+*.env
+auth.json
+*setup-token*
+*.token
+*.secret
+*.key
+*.pem
+
+# LiteLLM / ChatGPT local auth cache
+.config/
+chatgpt/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local tooling and scratch output
+node_modules/
+*.log
+tmp/
+scratch/
+terminals/
