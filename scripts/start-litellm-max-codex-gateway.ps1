@@ -2,7 +2,8 @@
 # subscription models exposed to Claude Code.
 param(
     [int]$Port = 4000,
-    [string]$MasterKey = "sk-litellm-local-master-key",
+    [string]$BindHost = "127.0.0.1",
+    [string]$MasterKey = "",
     [string]$Config = "litellm_config.max-codex-subscriptions.yaml",
     [string]$ChatGptTokenDir = ""
 )
@@ -13,6 +14,18 @@ Set-Location $Root
 $ConfigPath = (Resolve-Path $Config).Path
 
 Get-Command litellm -ErrorAction Stop | Out-Null
+
+if (-not $MasterKey) {
+    $MasterKey = $env:LITELLM_MASTER_KEY
+}
+
+if (-not $MasterKey) {
+    throw "Set -MasterKey or LITELLM_MASTER_KEY to an sk-prefixed local secret before starting LiteLLM."
+}
+
+if (-not $MasterKey.StartsWith("sk-")) {
+    throw "LiteLLM master key should start with sk- so Claude Code can send it as a bearer token."
+}
 
 $env:LITELLM_MASTER_KEY = $MasterKey
 $env:CLAUDE_LITELLM_CONFIG = $ConfigPath
@@ -27,7 +40,7 @@ if (-not $env:CHATGPT_AUTH_FILE) {
     $env:CHATGPT_AUTH_FILE = "auth.json"
 }
 
-Write-Host "[litellm] config=$ConfigPath port=$Port"
+Write-Host "[litellm] config=$ConfigPath host=$BindHost port=$Port"
 Write-Host "[litellm] ChatGPT token dir=$env:CHATGPT_TOKEN_DIR"
 Write-Host "[litellm] startup may print a ChatGPT device-code login URL if no token exists"
 Write-Host ""
@@ -56,4 +69,4 @@ Write-Host "[additional gateway discovery aliases]"
 Write-Host "  claude-opus-4-6"
 Write-Host "  claude-opus-4-7"
 
-litellm --config $ConfigPath --port $Port
+litellm --config $ConfigPath --host $BindHost --port $Port

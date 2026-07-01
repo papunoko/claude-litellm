@@ -66,6 +66,8 @@ uv tool upgrade litellm
 ## Gateway 起動
 
 ```powershell
+$env:LITELLM_MASTER_KEY = "sk-local-" + [guid]::NewGuid().ToString("N")
+$env:LITELLM_MASTER_KEY
 .\scripts\start-litellm-max-codex-gateway.ps1 -Port 4000
 ```
 
@@ -84,10 +86,12 @@ uv tool upgrade litellm
 
 この `auth.json` は絶対に commit しないでください。
 
+gateway は既定で `127.0.0.1:4000` にだけ bind します。別 host に bind する場合だけ `-BindHost` を明示してください。
+
 ## Claude Code 側設定
 
 手元の `~/.claude/settings.json` の設定例は [examples/claude-code-settings.json](examples/claude-code-settings.json) にあります。
-普段使いでは、ここで使う環境変数は shell profile ではなく `~/.claude/settings.json` の `env` に書いておくのがおすすめです。Claude Code の新規セッションごとに同じ gateway 設定が読み込まれ、LiteLLM の master key と `ANTHROPIC_CUSTOM_HEADERS` のずれも起きにくくなります。
+普段使いでは、ここで使う環境変数は shell profile ではなく `~/.claude/settings.json` の `env` に書いておくのがおすすめです。`<LITELLM_MASTER_KEY>` は起動時に使った `sk-` 始まりの値へ置き換えてください。Claude Code の新規セッションごとに同じ gateway 設定が読み込まれ、LiteLLM の master key と `ANTHROPIC_CUSTOM_HEADERS` のずれも起きにくくなります。
 
 PowerShell で一時的に試すなら、最小形は次の通りです。
 
@@ -96,7 +100,7 @@ Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
 
 $env:ANTHROPIC_BASE_URL = "http://localhost:4000"
-$env:ANTHROPIC_CUSTOM_HEADERS = "x-litellm-api-key: Bearer sk-litellm-local-master-key"
+$env:ANTHROPIC_CUSTOM_HEADERS = "x-litellm-api-key: Bearer $env:LITELLM_MASTER_KEY"
 $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
 
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"

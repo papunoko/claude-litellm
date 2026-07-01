@@ -129,10 +129,13 @@ class StartupScriptTests(unittest.TestCase):
         script = START_SCRIPT_PATH.read_text(encoding="utf-8")
 
         for expected in [
+            '[string]$BindHost = "127.0.0.1"',
+            'throw "Set -MasterKey or LITELLM_MASTER_KEY',
             "ANTHROPIC_BASE_URL=http://localhost:$Port",
             "ANTHROPIC_MODEL=claude-codex-gpt-5-5",
             "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
             "$env:CLAUDE_LITELLM_CONFIG = $ConfigPath",
+            "litellm --config $ConfigPath --host $BindHost --port $Port",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
             "claude-opus-4-6",
             "claude-opus-4-7",
@@ -148,6 +151,7 @@ class StartupScriptTests(unittest.TestCase):
             "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer $MasterKey",
             script,
         )
+        self.assertNotIn("local-master-key", script)
         self.assertNotIn("claude-codex-gpt-5-5-medium", script)
 
 
@@ -172,7 +176,7 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_MODEL"], "claude-codex-gpt-5-5")
         self.assertEqual(
             env["ANTHROPIC_CUSTOM_HEADERS"],
-            "x-litellm-api-key: Bearer sk-litellm-local-master-key",
+            "x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
         )
         self.assertEqual(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-4-8")
         self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5")
@@ -640,6 +644,50 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["include"], ["web_search_call.action.sources"])
         self.assertNotIn("max_uses", kwargs["tools"][0])
+
+    def test_forced_anthropic_web_search_tool_choice_maps_to_openai_web_search(
+        self,
+    ) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        data = {
+            "model": "claude-codex-gpt-5-5",
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=data["messages"],
+            model="gpt-5.5",
+            tools=data["tools"],
+            tool_choice=data["tool_choice"],
+            stream=False,
+            extra_kwargs={
+                "custom_llm_provider": "chatgpt",
+                "include": data["include"],
+            },
+        )
+
+        self.assertEqual(kwargs["tools"], [{"type": "web_search"}])
+        self.assertEqual(kwargs["tool_choice"], {"type": "web_search"})
 
     def test_openai_web_search_response_maps_back_to_anthropic_blocks(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (

@@ -500,6 +500,7 @@ def _patch_responses_web_search_translation() -> bool:
 
     if not getattr(adapter_cls, "_claude_litellm_web_search_patch", False):
         original_translate_tools = adapter_cls.translate_tools_to_responses_api
+        original_translate_tool_choice = adapter_cls.translate_tool_choice_to_responses_api
         original_translate_response = adapter_cls.translate_response
 
         def translate_tools_to_responses_api(
@@ -517,6 +518,24 @@ def _patch_responses_web_search_translation() -> bool:
                 translated.extend(original_translate_tools(self, [tool]))
             return translated
 
+        def translate_tool_choice_to_responses_api(tool_choice: Any) -> Any:
+            if isinstance(tool_choice, dict):
+                choice_type = str(tool_choice.get("type") or "")
+                choice_name = str(tool_choice.get("name") or "")
+                if (
+                    choice_type.startswith(_WEB_SEARCH_TOOL_PREFIX)
+                    or (
+                        choice_type == "tool"
+                        and (
+                            choice_name == "web_search"
+                            or choice_name.startswith(_WEB_SEARCH_TOOL_PREFIX)
+                        )
+                    )
+                ):
+                    return {"type": "web_search"}
+
+            return original_translate_tool_choice(tool_choice)
+
         def translate_response(self: Any, response: Any) -> Any:
             base_response = original_translate_response(self, response)
             return _translate_responses_api_response_with_web_search(
@@ -525,6 +544,9 @@ def _patch_responses_web_search_translation() -> bool:
             )
 
         adapter_cls.translate_tools_to_responses_api = translate_tools_to_responses_api
+        adapter_cls.translate_tool_choice_to_responses_api = staticmethod(
+            translate_tool_choice_to_responses_api
+        )
         adapter_cls.translate_response = translate_response
         adapter_cls._claude_litellm_web_search_patch = True
 
