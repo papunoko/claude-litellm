@@ -153,7 +153,7 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_MODEL"], "claude-codex-gpt-5-5")
         self.assertEqual(
             env["ANTHROPIC_CUSTOM_HEADERS"],
-            "x-litellm-api-key: Bearer litellm-local-master-key",
+            "x-litellm-api-key: Bearer sk-litellm-local-master-key",
         )
         self.assertEqual(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-4-8")
         self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5")

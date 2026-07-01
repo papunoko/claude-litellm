@@ -95,7 +95,7 @@ Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
 
 $env:ANTHROPIC_BASE_URL = "http://localhost:4000"
-$env:ANTHROPIC_CUSTOM_HEADERS = "x-litellm-api-key: Bearer litellm-local-master-key"
+$env:ANTHROPIC_CUSTOM_HEADERS = "x-litellm-api-key: Bearer sk-litellm-local-master-key"
 $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
 
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"

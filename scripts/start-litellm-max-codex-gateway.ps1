@@ -2,7 +2,7 @@
 # subscription models exposed to Claude Code.
 param(
     [int]$Port = 4000,
-    [string]$MasterKey = "litellm-local-master-key",
+    [string]$MasterKey = "sk-litellm-local-master-key",
     [string]$Config = "litellm_config.max-codex-subscriptions.yaml",
     [string]$ChatGptTokenDir = ""
 )
