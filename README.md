@@ -86,7 +86,7 @@ uv tool upgrade litellm
 
 ## Claude Code 側設定
 
-手元の `~/.claude/settings.json` に入れる例は [examples/claude-code-settings.json](examples/claude-code-settings.json) にあります。
+手元の `~/.claude/settings.json` の設定例は [examples/claude-code-settings.json](examples/claude-code-settings.json) にあります。
 普段使いでは、ここで使う環境変数は shell profile ではなく `~/.claude/settings.json` の `env` に書いておくのがおすすめです。Claude Code の新規セッションごとに同じ gateway 設定が読み込まれ、LiteLLM の master key と `ANTHROPIC_CUSTOM_HEADERS` のずれも起きにくくなります。
 
 PowerShell で一時的に試すなら、最小形は次の通りです。
