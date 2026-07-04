@@ -323,6 +323,63 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         self.assertEqual(data["thinking"], {"type": "adaptive"})
         self.assertEqual(data["reasoning"], {"effort": "xhigh"})
 
+    def test_fast_header_sets_service_tier_fast_for_codex_alias(self) -> None:
+        data = {
+            "model": "claude-codex-gpt-5-5",
+            "proxy_server_request": {
+                "headers": {"x-claude-litellm-service-tier": "fast"}
+            },
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["service_tier"], "fast")
+
+    def test_fast_header_does_not_modify_claude_alias(self) -> None:
+        data = {
+            "model": "claude-opus-4-8",
+            "proxy_server_request": {
+                "headers": {"x-claude-litellm-service-tier": "fast"}
+            },
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertNotIn("service_tier", data)
+
+    def test_standard_codex_request_does_not_set_service_tier_fast(self) -> None:
+        data = {
+            "model": "claude-codex-gpt-5-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertNotIn("service_tier", data)
+
     def test_config_default_medium_reaches_responses_kwargs(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
             _build_responses_kwargs,

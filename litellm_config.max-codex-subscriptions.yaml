@@ -49,8 +49,10 @@ model_list:
       reasoning:
         effort: medium
 
-litellm_settings:
+general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
   drop_params: true
   callbacks:
     # LiteLLM 1.89.4 routes Anthropic-compatible /v1/messages to Responses

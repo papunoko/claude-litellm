@@ -18,6 +18,7 @@ from litellm.integrations.custom_logger import CustomLogger
 
 _CHATGPT_MODEL_NAMES = {"claude-codex-gpt-5-5"}
 _CHATGPT_MODEL_PREFIXES = ("chatgpt/",)
+_FAST_SERVICE_TIER_HEADER = "x-claude-litellm-service-tier"
 _NON_CLAUDE_MODELS_ENV = "CLAUDE_LITELLM_NON_CLAUDE_MODELS"
 _LITELLM_CONFIG_ENV = "CLAUDE_LITELLM_CONFIG"
 _DEFAULT_CONFIG_FILENAMES = ("litellm_config.max-codex-subscriptions.yaml",)
@@ -974,6 +975,53 @@ def _apply_chatgpt_effort(data: dict, model: str | None = None) -> None:
     data["reasoning"] = {**reasoning, "effort": effort}
 
 
+def _header_value(headers: Any, name: str) -> str | None:
+    if not isinstance(headers, dict):
+        return None
+
+    lower_name = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == lower_name:
+            return str(value)
+
+    return None
+
+
+def _request_header_value(data: dict, name: str) -> str | None:
+    proxy_request = data.get("proxy_server_request")
+    if isinstance(proxy_request, dict):
+        for key in ("headers", "request_headers"):
+            value = _header_value(proxy_request.get(key), name)
+            if value is not None:
+                return value
+
+    for key in ("headers", "request_headers", "extra_headers"):
+        value = _header_value(data.get(key), name)
+        if value is not None:
+            return value
+
+    return None
+
+
+def _is_fast_chatgpt_request(data: dict) -> bool:
+    service_tier = data.get("service_tier")
+    if isinstance(service_tier, str) and service_tier.lower() == "fast":
+        return True
+
+    header_value = _request_header_value(data, _FAST_SERVICE_TIER_HEADER)
+    return isinstance(header_value, str) and header_value.lower() == "fast"
+
+
+def _apply_chatgpt_fast_mode(data: dict, model: str | None = None) -> None:
+    if not _is_chatgpt_request(data, model=model):
+        return
+
+    if not _is_fast_chatgpt_request(data):
+        return
+
+    data["service_tier"] = "fast"
+
+
 class ChatGPTAnthropicMessagesPatch(CustomLogger):
     def __init__(self) -> None:
         self.enabled = _enable_patches()
@@ -991,6 +1039,7 @@ class ChatGPTAnthropicMessagesPatch(CustomLogger):
         _enable_patches()
         _ensure_openai_web_search_sources_included(kwargs, model=model)
         _apply_chatgpt_effort(kwargs, model=model)
+        _apply_chatgpt_fast_mode(kwargs, model=model)
         return kwargs
 
     async def async_pre_call_hook(
@@ -1006,6 +1055,7 @@ class ChatGPTAnthropicMessagesPatch(CustomLogger):
         if call_type == "anthropic_messages":
             _append_non_claude_models_note_to_system(data)
         _apply_chatgpt_effort(data)
+        _apply_chatgpt_fast_mode(data)
         return data
 
 
