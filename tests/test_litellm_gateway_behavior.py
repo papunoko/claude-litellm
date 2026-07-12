@@ -45,6 +45,7 @@ def capture_litellm_patch_state() -> list[tuple[object, str, object]]:
         (utils, "_claude_litellm_chatgpt_effort_patch"),
         (Logging, "_handle_anthropic_messages_response_logging"),
         (Logging, "_claude_litellm_chatgpt_logging_patch"),
+        (LiteLLMAnthropicToResponsesAPIAdapter, "translate_messages_to_responses_input"),
         (LiteLLMAnthropicToResponsesAPIAdapter, "translate_tools_to_responses_api"),
         (LiteLLMAnthropicToResponsesAPIAdapter, "translate_response"),
         (LiteLLMAnthropicToResponsesAPIAdapter, "_claude_litellm_web_search_patch"),
@@ -370,6 +371,110 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             )
         )
 
+    def test_codex_request_enables_stateless_encrypted_reasoning_replay(self) -> None:
+        data = {
+            "model": "claude-codex-gpt-5-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["include"], ["reasoning.encrypted_content"])
+        self.assertIs(data["store"], False)
+
+    def test_signed_gpt_thinking_replays_as_a_reasoning_item(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+            _build_responses_kwargs,
+        )
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Keep the existing plan.",
+                        "signature": "gpt#encrypted-turn-state",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_123",
+                        "content": "file contents",
+                    }
+                ],
+            },
+        ]
+
+        kwargs = _build_responses_kwargs(
+            max_tokens=100,
+            messages=messages,
+            model="gpt-5.6-sol",
+            stream=False,
+            extra_kwargs={"custom_llm_provider": "chatgpt"},
+        )
+
+        self.assertEqual(
+            [item["type"] for item in kwargs["input"]],
+            ["reasoning", "function_call", "function_call_output"],
+        )
+        self.assertEqual(
+            kwargs["input"][0],
+            {
+                "type": "reasoning",
+                "summary": [
+                    {
+                        "type": "summary_text",
+                        "text": "Keep the existing plan.",
+                    }
+                ],
+                "encrypted_content": "encrypted-turn-state",
+            },
+        )
+
+    def test_non_gpt_thinking_signature_is_not_replayed_to_openai(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+            LiteLLMAnthropicToResponsesAPIAdapter,
+        )
+
+        translated = (
+            LiteLLMAnthropicToResponsesAPIAdapter()
+            .translate_messages_to_responses_input(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "Native Claude thought",
+                                "signature": "native-claude-signature",
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(translated[0]["type"], "message")
+        self.assertFalse(any(item["type"] == "reasoning" for item in translated))
+
     def test_max_effort_maps_to_xhigh_for_codex_alias(self) -> None:
         data = {
             "model": "claude-codex-gpt-5-5",
@@ -655,6 +760,16 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             },
             {
                 "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "",
+                        "signature": "gpt#encrypted-without-summary",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
                 "content": [{"type": "redacted_thinking"}],
             },
         ]
@@ -676,6 +791,16 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                             "type": "thinking",
                             "thinking": "valid",
                             "signature": "sig",
+                        }
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": "gpt#encrypted-without-summary",
                         }
                     ],
                 },
@@ -790,7 +915,13 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(kwargs["include"], ["web_search_call.action.sources"])
+        self.assertEqual(
+            kwargs["include"],
+            [
+                "reasoning.encrypted_content",
+                "web_search_call.action.sources",
+            ],
+        )
         self.assertNotIn("max_uses", kwargs["tools"][0])
 
     def test_forced_anthropic_web_search_tool_choice_maps_to_openai_web_search(
@@ -836,6 +967,96 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
 
         self.assertEqual(kwargs["tools"], [{"type": "web_search"}])
         self.assertEqual(kwargs["tool_choice"], {"type": "web_search"})
+
+    def test_non_streaming_reasoning_is_captured_in_thinking_signature(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+            LiteLLMAnthropicToResponsesAPIAdapter,
+        )
+        from litellm.types.llms.openai import ResponsesAPIResponse
+
+        response = ResponsesAPIResponse.model_construct(
+            id="resp_reasoning",
+            object="response",
+            created_at=0,
+            model="gpt-5.6-sol",
+            status="completed",
+            output=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_123",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Keep the plan across the tool call.",
+                        }
+                    ],
+                    "encrypted_content": "encrypted-turn-state",
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_123",
+                    "call_id": "call_123",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        translated = LiteLLMAnthropicToResponsesAPIAdapter().translate_response(
+            response
+        )
+
+        self.assertEqual(
+            translated["content"][0],
+            {
+                "type": "thinking",
+                "thinking": "Keep the plan across the tool call.",
+                "signature": "gpt#encrypted-turn-state",
+            },
+        )
+        self.assertEqual(translated["content"][1]["type"], "tool_use")
+        self.assertEqual(translated["content"][1]["id"], "call_123")
+
+    def test_reasoning_without_summary_still_gets_a_replay_signature(self) -> None:
+        base_response = {
+            "id": "msg_reasoning",
+            "type": "message",
+            "role": "assistant",
+            "model": "gpt-5.6-sol",
+            "content": [],
+            "usage": {},
+            "stop_reason": "end_turn",
+        }
+        translated = self.patch._translate_responses_api_response_with_web_search(
+            {
+                "id": "resp_reasoning",
+                "model": "gpt-5.6-sol",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_123",
+                        "summary": [],
+                        "encrypted_content": "encrypted-without-summary",
+                    }
+                ],
+            },
+            base_response,
+        )
+
+        self.assertEqual(
+            translated["content"],
+            [
+                {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "gpt#encrypted-without-summary",
+                }
+            ],
+        )
 
     def test_openai_web_search_response_maps_back_to_anthropic_blocks(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
@@ -926,6 +1147,91 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         self.assertEqual(
             translated["usage"]["server_tool_use"],
             {"web_search_requests": 1},
+        )
+
+    def test_streaming_reasoning_signature_round_trips_into_next_request(
+        self,
+    ) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (
+            AnthropicResponsesStreamWrapper,
+        )
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+            LiteLLMAnthropicToResponsesAPIAdapter,
+        )
+
+        wrapper = AnthropicResponsesStreamWrapper(
+            responses_stream=[],
+            model="gpt-5.6-sol",
+        )
+        wrapper._process_event(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_123"},
+            }
+        )
+        wrapper._process_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_123",
+                "delta": "Keep the plan.",
+            }
+        )
+        wrapper._process_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_123",
+                    "encrypted_content": "encrypted-turn-state",
+                },
+            }
+        )
+
+        chunks = list(wrapper._chunk_queue)
+        signature_delta = next(
+            chunk["delta"]
+            for chunk in chunks
+            if chunk.get("type") == "content_block_delta"
+            and chunk.get("delta", {}).get("type") == "signature_delta"
+        )
+        stop_index = next(
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk.get("type") == "content_block_stop"
+        )
+        signature_index = next(
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk.get("delta", {}).get("type") == "signature_delta"
+        )
+
+        self.assertEqual(
+            signature_delta["signature"],
+            "gpt#encrypted-turn-state",
+        )
+        self.assertLess(signature_index, stop_index)
+
+        replayed = (
+            LiteLLMAnthropicToResponsesAPIAdapter()
+            .translate_messages_to_responses_input(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "Keep the plan.",
+                                "signature": signature_delta["signature"],
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+        self.assertEqual(replayed[0]["type"], "reasoning")
+        self.assertEqual(
+            replayed[0]["encrypted_content"],
+            "encrypted-turn-state",
         )
 
     def test_streaming_openai_web_search_response_maps_to_anthropic_events(
