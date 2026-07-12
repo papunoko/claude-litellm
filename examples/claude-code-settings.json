@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
     "ANTHROPIC_BASE_URL": "http://localhost:4000",
-    "ANTHROPIC_MODEL": "claude-codex-gpt-5-5",
+    "ANTHROPIC_MODEL": "claude-codex-gpt-5-6",
     "ANTHROPIC_CUSTOM_HEADERS": "x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus 4.8 via LiteLLM",
@@ -15,11 +15,11 @@
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5-20251001",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Haiku 4.5 via LiteLLM",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "Claude subscription Haiku via LiteLLM",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-codex-gpt-5-5",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Codex GPT-5.5 via LiteLLM",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-codex-gpt-5-6",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Codex GPT-5.6 Sol via LiteLLM",
     "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "ChatGPT/Codex subscription model",
     "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES": "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
   },
-  "model": "claude-codex-gpt-5-5",
+  "model": "claude-codex-gpt-5-6",
   "effortLevel": "medium"
 }

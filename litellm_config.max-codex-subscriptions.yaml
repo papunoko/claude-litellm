@@ -44,8 +44,39 @@ model_list:
   - model_name: claude-codex-gpt-5-5
     model_info:
       mode: responses
+      # This gateway uses the Codex / ChatGPT subscription surface for GPT-5.5.
+      # On that surface GPT-5.5 is a 400K total window split into a 272K
+      # input budget + a 128K reasoning/output budget. Pin the honest split
+      # here so Claude Code's gateway model discovery and LiteLLM's own token
+      # accounting stop over-filling the prompt. Advertising the full 400K as
+      # *input* is exactly what makes a long subagent turn 400 with
+      # "input exceeds 272000" and take the whole Claude Code session down with
+      # it. Total window = max_input_tokens + max_output_tokens = 400000.
+      max_input_tokens: 272000
+      max_output_tokens: 128000
+      max_tokens: 128000
     litellm_params:
       model: chatgpt/gpt-5.5
+      reasoning:
+        effort: medium
+
+  # GPT-5.6 flagship (Sol) through the same Codex / ChatGPT subscription
+  # surface. GPT-5.6 routes through LiteLLM's existing GPT-5 config family,
+  # so the 1.89.4 pin keeps working; only cost-map metadata lags behind.
+  - model_name: claude-codex-gpt-5-6
+    model_info:
+      mode: responses
+      # The published API context for GPT-5.6 is much larger, but the Codex
+      # subscription surface historically advertises a smaller effective
+      # window than the API (GPT-5.5: 272K input of a 400K total). Until a
+      # smoke test against the subscription surface proves a bigger budget,
+      # reuse the proven 272K/128K split so long subagent turns fail safe
+      # instead of 400ing mid-session.
+      max_input_tokens: 272000
+      max_output_tokens: 128000
+      max_tokens: 128000
+    litellm_params:
+      model: chatgpt/gpt-5.6-sol
       reasoning:
         effort: medium
 

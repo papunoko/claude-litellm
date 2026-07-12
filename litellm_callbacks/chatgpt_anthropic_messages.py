@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from litellm.integrations.custom_logger import CustomLogger
 
 
-_CHATGPT_MODEL_NAMES = {"claude-codex-gpt-5-5"}
+_CHATGPT_MODEL_NAMES = {"claude-codex-gpt-5-5", "claude-codex-gpt-5-6"}
 _CHATGPT_MODEL_PREFIXES = ("chatgpt/",)
 _FAST_SERVICE_TIER_HEADER = "x-claude-litellm-service-tier"
 _NON_CLAUDE_MODELS_ENV = "CLAUDE_LITELLM_NON_CLAUDE_MODELS"
@@ -67,6 +67,10 @@ def _patch_chatgpt_effort_normalization() -> bool:
         provider = custom_llm_provider or ""
         if provider == "chatgpt" or model_name.startswith("chatgpt/"):
             if effort == "max":
+                # GPT-5.6 accepts reasoning.effort=max natively; older
+                # generations top out at xhigh.
+                if _chatgpt_model_supports_max_effort(model_name):
+                    return "max"
                 return "xhigh"
             if effort == "xhigh":
                 return "xhigh"
@@ -921,12 +925,22 @@ def _is_chatgpt_request(data: dict, model: str | None = None) -> bool:
     return False
 
 
-def _normalize_chatgpt_effort(effort: Any) -> str | None:
+def _chatgpt_model_supports_max_effort(model_name: str | None) -> bool:
+    # reasoning.effort=max shipped with the GPT-5.6 generation; earlier
+    # chatgpt-surface generations reject it. Match both the upstream form
+    # (chatgpt/gpt-5.6-sol) and the gateway alias form (claude-codex-gpt-5-6).
+    name = str(model_name or "")
+    return "gpt-5.6" in name or "gpt-5-6" in name
+
+
+def _normalize_chatgpt_effort(effort: Any, model: str | None = None) -> str | None:
     if not isinstance(effort, str):
         return None
 
     normalized = effort.lower()
     if normalized == "max":
+        if _chatgpt_model_supports_max_effort(model):
+            return "max"
         return "xhigh"
     if normalized == "minimal":
         return "low"
@@ -936,16 +950,18 @@ def _normalize_chatgpt_effort(effort: Any) -> str | None:
     return None
 
 
-def _extract_effort(data: dict) -> str | None:
+def _extract_effort(data: dict, model: str | None = None) -> str | None:
+    model_name = str(data.get("model") or model or "")
+
     output_config = data.get("output_config")
     if isinstance(output_config, dict):
-        effort = _normalize_chatgpt_effort(output_config.get("effort"))
+        effort = _normalize_chatgpt_effort(output_config.get("effort"), model_name)
         if effort:
             return effort
 
     reasoning = data.get("reasoning")
     if isinstance(reasoning, dict):
-        effort = _normalize_chatgpt_effort(reasoning.get("effort"))
+        effort = _normalize_chatgpt_effort(reasoning.get("effort"), model_name)
         if effort:
             return effort
 
@@ -956,7 +972,7 @@ def _apply_chatgpt_effort(data: dict, model: str | None = None) -> None:
     if not _is_chatgpt_request(data, model=model):
         return
 
-    effort = _extract_effort(data)
+    effort = _extract_effort(data, model=model)
     if not effort:
         return
 

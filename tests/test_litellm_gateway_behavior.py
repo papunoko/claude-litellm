@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar
@@ -18,6 +19,7 @@ CONFIG_PATH = ROOT / "litellm_config.max-codex-subscriptions.yaml"
 START_SCRIPT_PATH = ROOT / "scripts" / "start-litellm-max-codex-gateway.ps1"
 TEST_SCRIPT_PATH = ROOT / "scripts" / "test-litellm-max-codex-gateway.ps1"
 CLAUDE_CODE_SETTINGS_EXAMPLE_PATH = ROOT / "examples" / "claude-code-settings.json"
+CODEX_CONTEXT_BUDGET_EXAMPLE_PATH = ROOT / "examples" / "codex-context-budget.toml"
 PATCH_MODULE_NAME = "litellm_callbacks.chatgpt_anthropic_messages"
 MISSING = object()
 PATCH_ENV_VARS = (
@@ -85,6 +87,7 @@ class GatewayConfigTests(unittest.TestCase):
                 "claude-sonnet-5",
                 "claude-haiku-4-5-20251001",
                 "claude-codex-gpt-5-5",
+                "claude-codex-gpt-5-6",
             ],
         )
         self.assertNotIn("claude-codex-gpt-5-5-medium", model_names)
@@ -104,6 +107,60 @@ class GatewayConfigTests(unittest.TestCase):
         self.assertEqual(
             codex["litellm_params"]["reasoning"],
             {"effort": "medium"},
+        )
+
+    def test_codex_alias_pins_gpt_5_5_context_window(self) -> None:
+        config = load_config()
+        codex = next(
+            entry
+            for entry in config["model_list"]
+            if entry["model_name"] == "claude-codex-gpt-5-5"
+        )
+        model_info = codex["model_info"]
+
+        # GPT-5.5 on the Codex / ChatGPT subscription surface is a
+        # 400K-total window split 272K input + 128K output. Pin it
+        # explicitly so gateway model discovery and LiteLLM token accounting
+        # do not over-fill the prompt and 400 a long subagent turn.
+        self.assertEqual(model_info["max_input_tokens"], 272000)
+        self.assertEqual(model_info["max_output_tokens"], 128000)
+        self.assertEqual(model_info["max_tokens"], 128000)
+        self.assertEqual(
+            model_info["max_input_tokens"] + model_info["max_output_tokens"],
+            400000,
+        )
+
+    def test_gpt_5_6_alias_defaults_to_sol_responses_medium(self) -> None:
+        config = load_config()
+        codex = next(
+            entry
+            for entry in config["model_list"]
+            if entry["model_name"] == "claude-codex-gpt-5-6"
+        )
+
+        self.assertEqual(codex["model_info"]["mode"], "responses")
+        self.assertEqual(codex["litellm_params"]["model"], "chatgpt/gpt-5.6-sol")
+        self.assertEqual(
+            codex["litellm_params"]["reasoning"],
+            {"effort": "medium"},
+        )
+        # Reuse the proven GPT-5.5 subscription-surface split until a smoke
+        # test against the Codex surface proves a bigger budget for 5.6.
+        model_info = codex["model_info"]
+        self.assertEqual(model_info["max_input_tokens"], 272000)
+        self.assertEqual(model_info["max_output_tokens"], 128000)
+        self.assertEqual(model_info["max_tokens"], 128000)
+
+    def test_codex_cli_context_budget_example_keeps_32k_headroom(self) -> None:
+        with CODEX_CONTEXT_BUDGET_EXAMPLE_PATH.open("rb") as handle:
+            config = tomllib.load(handle)
+
+        self.assertEqual(config["model_context_window"], 272000)
+        self.assertEqual(config["model_auto_compact_token_limit"], 240000)
+        self.assertEqual(
+            config["model_context_window"]
+            - config["model_auto_compact_token_limit"],
+            32000,
         )
 
     def test_client_authorization_header_is_not_forwarded_to_chatgpt(self) -> None:
@@ -134,20 +191,29 @@ class StartupScriptTests(unittest.TestCase):
             '[string]$BindHost = "127.0.0.1"',
             'throw "Set -MasterKey or LITELLM_MASTER_KEY',
             "ANTHROPIC_BASE_URL=http://localhost:$Port",
-            "ANTHROPIC_MODEL=claude-codex-gpt-5-5",
+            "ANTHROPIC_MODEL=claude-codex-gpt-5-6",
             "ANTHROPIC_CUSTOM_HEADERS=x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
             "$env:CLAUDE_LITELLM_CONFIG = $ConfigPath",
             "litellm --config $ConfigPath --host $BindHost --port $Port",
-            "exit $LASTEXITCODE",
+            "$ExitCode = $LASTEXITCODE",
+            "exit $ExitCode",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
             "claude-opus-4-6",
             "claude-opus-4-7",
             "claude-fable-5",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8",
+            "claude-codex-gpt-5-5",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-codex-gpt-5-6",
             "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION=claude-codex-gpt-5-5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION=claude-codex-gpt-5-6",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking",
+            "$ClientOnlyEnvNames = @(",
+            '"ANTHROPIC_BASE_URL"',
+            '"ANTHROPIC_CUSTOM_HEADERS"',
+            '"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"',
+            "cleared client-only Anthropic env before launching gateway",
+            "[Environment]::SetEnvironmentVariable($Name, $null, \"Process\")",
+            "finally {",
         ]:
             self.assertIn(expected, script)
 
@@ -174,10 +240,10 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
         )
         env = settings["env"]
 
-        self.assertEqual(settings["model"], "claude-codex-gpt-5-5")
+        self.assertEqual(settings["model"], "claude-codex-gpt-5-6")
         self.assertEqual(settings["effortLevel"], "medium")
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4000")
-        self.assertEqual(env["ANTHROPIC_MODEL"], "claude-codex-gpt-5-5")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "claude-codex-gpt-5-6")
         self.assertEqual(
             env["ANTHROPIC_CUSTOM_HEADERS"],
             "x-litellm-api-key: Bearer <LITELLM_MASTER_KEY>",
@@ -190,7 +256,7 @@ class ClaudeCodeSettingsExampleTests(unittest.TestCase):
         )
         self.assertEqual(
             env["ANTHROPIC_CUSTOM_MODEL_OPTION"],
-            "claude-codex-gpt-5-5",
+            "claude-codex-gpt-5-6",
         )
 
 
@@ -228,7 +294,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
 
         self.assertEqual(
             self.patch._non_claude_model_names_from_config(config),
-            ("claude-codex-gpt-5-5",),
+            ("claude-codex-gpt-5-5", "claude-codex-gpt-5-6"),
         )
 
     def test_all_non_claude_gateway_models_are_listed(self) -> None:
@@ -322,6 +388,27 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
         self.assertEqual(data["output_config"]["effort"], "xhigh")
         self.assertEqual(data["thinking"], {"type": "adaptive"})
         self.assertEqual(data["reasoning"], {"effort": "xhigh"})
+
+    def test_max_effort_is_kept_native_for_gpt_5_6_alias(self) -> None:
+        # GPT-5.6 supports reasoning.effort=max natively, so the gateway
+        # must stop downgrading it to xhigh on the 5.6 alias.
+        data = {
+            "model": "claude-codex-gpt-5-6",
+            "output_config": {"effort": "max"},
+        }
+
+        asyncio.run(
+            self.patch.proxy_handler_instance.async_pre_call_hook(
+                None,
+                None,
+                data,
+                "anthropic_messages",
+            )
+        )
+
+        self.assertEqual(data["output_config"]["effort"], "max")
+        self.assertEqual(data["thinking"], {"type": "adaptive"})
+        self.assertEqual(data["reasoning"], {"effort": "max"})
 
     def test_fast_header_sets_service_tier_fast_for_codex_alias(self) -> None:
         data = {
