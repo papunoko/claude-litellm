@@ -200,7 +200,11 @@ structured output は **Codex/ChatGPT 経路で常に失敗するわけではあ
 - LiteLLM の Anthropic Messages -> Responses 経路を `chatgpt/` provider にも有効化する
 - Anthropic の top-level `system` を Responses の `instructions` に写す
 - Codex alias の `/effort` を Responses `reasoning.effort` に写す
-- Claude / Codex を同じ会話で切り替えた時に残る空 `thinking` block を落とす
+- Responses の `reasoning.encrypted_content` を `thinking.signature` に退避し、次の tool turn で `reasoning` item として再送する
+- reasoning replay は空でなく上限内の `gpt#` marker 付き signature だけを対象にし、空または過大な値は再生しない
+- Codex 向け request では native Claude の `thinking` / `redacted_thinking` を除去し、Claude 向け request では `gpt#` thinking を除去する
+- Claude の署名付き `thinking` は本文が空でも未変更で保持し、model 切替後の tool loop を壊さない
+- reasoning / text / tool use を元の block 順で Responses item に変換する
 - Anthropic `web_search_*` tool を OpenAI Responses `web_search` tool へ変換する
 - OpenAI `web_search_call` / `url_citation` を Anthropic の `server_tool_use` / `web_search_tool_result` / `citations` へ戻す
 - Claude の system prompt 末尾に、gateway で使える非 Claude alias を XML 風 note として追記する
@@ -211,6 +215,7 @@ structured output は **Codex/ChatGPT 経路で常に失敗するわけではあ
 - OAuth token、`auth.json`、`.env`、API key、setup token は commit しないでください。
 - Claude Code が gateway へ送る Claude OAuth `Authorization` header は、Claude 系 alias にだけ forward します。`chatgpt/` には forward しません。
 - ChatGPT/Codex 側の token は LiteLLM `chatgpt/` provider がローカル token directory から読みます。
+- Codex alias は `store: false` と `include: ["reasoning.encrypted_content"]` を使います。暗号化された reasoning state は Claude Code が opaque な `thinking.signature` として次の tool turn まで往復させ、gateway の再起動をまたいでも server-side response state に依存しません。
 - OpenAI と Anthropic の hosted web search 結果形式は完全一致しません。実用上の source / citation は戻しますが、Anthropic の encrypted citation fields は OpenAI 出力から再生成できないため空になります。
 
 ## テスト

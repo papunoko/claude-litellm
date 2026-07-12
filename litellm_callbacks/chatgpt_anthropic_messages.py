@@ -9,6 +9,7 @@ but LiteLLM 1.89.4 only enables the path for the `openai` provider. The official
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,6 +29,9 @@ _NON_CLAUDE_MODEL_NAMES_CACHE: tuple[str, ...] | None = None
 _WEB_SEARCH_TOOL_PREFIX = "web_search_"
 _WEB_SEARCH_DOMAIN_FILTER_KEYS = ("allowed_domains", "blocked_domains")
 _OPENAI_WEB_SEARCH_SOURCES_INCLUDE = "web_search_call.action.sources"
+_OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE = "reasoning.encrypted_content"
+_OPENAI_REASONING_SIGNATURE_PREFIX = "gpt#"
+_OPENAI_REASONING_SIGNATURE_MAX_LENGTH = 32 * 1024 * 1024
 
 
 def _enable_chatgpt_responses_route() -> bool:
@@ -179,6 +183,134 @@ def _get_value(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+def _encode_openai_reasoning_signature(encrypted_content: Any) -> str | None:
+    if not isinstance(encrypted_content, str) or not encrypted_content:
+        return None
+    signature = f"{_OPENAI_REASONING_SIGNATURE_PREFIX}{encrypted_content}"
+    if len(signature) > _OPENAI_REASONING_SIGNATURE_MAX_LENGTH:
+        return None
+    return signature
+
+
+def _is_openai_reasoning_signature(signature: Any) -> bool:
+    return isinstance(signature, str) and signature.startswith(
+        _OPENAI_REASONING_SIGNATURE_PREFIX
+    )
+
+
+def _decode_openai_reasoning_signature(signature: Any) -> str | None:
+    if (
+        not _is_openai_reasoning_signature(signature)
+        or len(signature) > _OPENAI_REASONING_SIGNATURE_MAX_LENGTH
+    ):
+        return None
+
+    encrypted_content = signature[len(_OPENAI_REASONING_SIGNATURE_PREFIX) :]
+    return encrypted_content or None
+
+
+def _response_reasoning_signature(item: Any) -> str | None:
+    return _encode_openai_reasoning_signature(
+        _get_value(item, "encrypted_content")
+    )
+
+
+def _responses_reasoning_item_from_anthropic_block(
+    block: dict[str, Any],
+) -> dict[str, Any] | None:
+    encrypted_content = _decode_openai_reasoning_signature(block.get("signature"))
+    if encrypted_content is None:
+        return None
+
+    thinking = block.get("thinking")
+    summary: list[dict[str, str]] = []
+    if isinstance(thinking, str) and thinking:
+        summary.append({"type": "summary_text", "text": thinking})
+
+    return {
+        "type": "reasoning",
+        "summary": summary,
+        "encrypted_content": encrypted_content,
+    }
+
+
+def _translate_message_segment(
+    original_translate_messages: Any,
+    adapter: Any,
+    message: dict[str, Any],
+    blocks: list[Any],
+) -> list[dict[str, Any]]:
+    if not blocks:
+        return []
+    return original_translate_messages(
+        adapter,
+        [{**message, "content": list(blocks)}],
+    )
+
+
+def _translate_assistant_message_in_order(
+    original_translate_messages: Any,
+    adapter: Any,
+    message: dict[str, Any],
+    content: list[Any],
+) -> list[dict[str, Any]]:
+    """Translate assistant blocks without moving text across tool calls."""
+    translated: list[dict[str, Any]] = []
+    text_segment: list[Any] = []
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+
+        block_type = block.get("type")
+        if block_type == "text":
+            text_segment.append(block)
+            continue
+
+        if text_segment:
+            translated.extend(
+                _translate_message_segment(
+                    original_translate_messages,
+                    adapter,
+                    message,
+                    text_segment,
+                )
+            )
+            text_segment.clear()
+
+        if block_type == "thinking":
+            reasoning_item = _responses_reasoning_item_from_anthropic_block(block)
+            if reasoning_item is not None:
+                translated.append(reasoning_item)
+            # Native Claude thinking must never become GPT assistant text.
+            continue
+
+        if block_type == "redacted_thinking":
+            # Redacted Claude thinking is provider-owned opaque state too.
+            continue
+
+        translated.extend(
+            _translate_message_segment(
+                original_translate_messages,
+                adapter,
+                message,
+                [block],
+            )
+        )
+
+    if text_segment:
+        translated.extend(
+            _translate_message_segment(
+                original_translate_messages,
+                adapter,
+                message,
+                text_segment,
+            )
+        )
+
+    return translated
 
 
 def _response_output_items(response: Any) -> list[Any]:
@@ -374,7 +506,12 @@ def _translate_responses_api_response_with_web_search(
         _response_item_type(item) == "web_search_call" for item in output_items
     )
     has_url_citations = bool(_collect_url_titles_from_response(response))
-    if not has_web_search and not has_url_citations:
+    has_replayable_reasoning = any(
+        _response_item_type(item) == "reasoning"
+        and _response_reasoning_signature(item) is not None
+        for item in output_items
+    )
+    if not has_web_search and not has_url_citations and not has_replayable_reasoning:
         return base_response
 
     content: list[dict[str, Any]] = []
@@ -386,17 +523,22 @@ def _translate_responses_api_response_with_web_search(
         item_type = _response_item_type(item)
         if item_type == "reasoning":
             summaries = _get_value(item, "summary", [])
+            summary_texts: list[str] = []
             if isinstance(summaries, list):
                 for summary in summaries:
                     text = _get_value(summary, "text", "")
                     if text:
-                        content.append(
-                            {
-                                "type": "thinking",
-                                "thinking": str(text),
-                                "signature": None,
-                            }
-                        )
+                        summary_texts.append(str(text))
+            summary_text = "\n".join(summary_texts)
+            signature = _response_reasoning_signature(item)
+            if summary_text or signature:
+                content.append(
+                    {
+                        "type": "thinking",
+                        "thinking": summary_text,
+                        "signature": signature,
+                    }
+                )
         elif item_type == "message":
             message_content = _get_value(item, "content", [])
             if not isinstance(message_content, list):
@@ -414,8 +556,6 @@ def _translate_responses_api_response_with_web_search(
                     block["citations"] = citations
                 content.append(block)
         elif item_type == "function_call":
-            import json
-
             arguments = _get_value(item, "arguments", "{}")
             try:
                 input_data = json.loads(arguments) if arguments else {}
@@ -504,9 +644,39 @@ def _patch_responses_web_search_translation() -> bool:
         return False
 
     if not getattr(adapter_cls, "_claude_litellm_web_search_patch", False):
+        original_translate_messages = (
+            adapter_cls.translate_messages_to_responses_input
+        )
         original_translate_tools = adapter_cls.translate_tools_to_responses_api
         original_translate_tool_choice = adapter_cls.translate_tool_choice_to_responses_api
         original_translate_response = adapter_cls.translate_response
+
+        def translate_messages_to_responses_input(
+            self: Any,
+            messages: list[Any],
+        ) -> list[dict[str, Any]]:
+            translated: list[dict[str, Any]] = []
+
+            for message in messages:
+                if not isinstance(message, dict):
+                    translated.extend(original_translate_messages(self, [message]))
+                    continue
+
+                content = message.get("content")
+                if message.get("role") != "assistant" or not isinstance(content, list):
+                    translated.extend(original_translate_messages(self, [message]))
+                    continue
+
+                translated.extend(
+                    _translate_assistant_message_in_order(
+                        original_translate_messages,
+                        self,
+                        message,
+                        content,
+                    )
+                )
+
+            return translated
 
         def translate_tools_to_responses_api(
             self: Any,
@@ -548,6 +718,9 @@ def _patch_responses_web_search_translation() -> bool:
                 base_response,
             )
 
+        adapter_cls.translate_messages_to_responses_input = (
+            translate_messages_to_responses_input
+        )
         adapter_cls.translate_tools_to_responses_api = translate_tools_to_responses_api
         adapter_cls.translate_tool_choice_to_responses_api = staticmethod(
             translate_tool_choice_to_responses_api
@@ -577,6 +750,29 @@ def _patch_responses_web_search_translation() -> bool:
                 for block in _web_search_blocks_from_responses_item(item, url_titles):
                     _append_stream_content_block(self, block)
                 return
+
+            if event_type == "response.output_item.done" and item_type == "reasoning":
+                signature = _response_reasoning_signature(item)
+                if signature is not None:
+                    item_id = str(_get_value(item, "id", "") or "")
+                    block_index = (
+                        self._item_id_to_block_index.get(
+                            item_id,
+                            self._current_block_index,
+                        )
+                        if item_id
+                        else self._current_block_index
+                    )
+                    self._chunk_queue.append(
+                        {
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {
+                                "type": "signature_delta",
+                                "signature": signature,
+                            },
+                        }
+                    )
 
             original_process_event(self, event)
 
@@ -640,20 +836,37 @@ def _enable_patches() -> bool:
     return True
 
 
-def _is_empty_thinking_block(block: Any) -> bool:
+def _keep_thinking_block_for_target(
+    block: Any,
+    *,
+    target_is_chatgpt: bool,
+) -> bool:
     if not isinstance(block, dict):
-        return False
+        return True
 
     block_type = block.get("type")
     if block_type == "thinking":
+        signature = block.get("signature")
+        if target_is_chatgpt:
+            return _decode_openai_reasoning_signature(signature) is not None
+
+        # Synthetic GPT signatures are never valid Anthropic signatures,
+        # including malformed or oversized gateway-tagged values.
+        if _is_openai_reasoning_signature(signature):
+            return False
+
         thinking = block.get("thinking")
-        return not isinstance(thinking, str) or thinking == ""
+        has_thinking = isinstance(thinking, str) and bool(thinking)
+        has_native_signature = isinstance(signature, str) and bool(signature)
+        return has_thinking or has_native_signature
 
     if block_type == "redacted_thinking":
+        if target_is_chatgpt:
+            return False
         data = block.get("data")
-        return not isinstance(data, str) or data == ""
+        return isinstance(data, str) and bool(data)
 
-    return False
+    return True
 
 
 def _split_model_names(value: str) -> tuple[str, ...]:
@@ -817,7 +1030,11 @@ def _append_non_claude_models_note_to_system(data: dict[str, Any]) -> None:
         data["system"] = note
 
 
-def _strip_empty_thinking_blocks_from_messages(messages: Iterable[Any]) -> list[Any]:
+def _sanitize_thinking_blocks_for_target(
+    messages: Iterable[Any],
+    *,
+    target_is_chatgpt: bool,
+) -> list[Any]:
     cleaned: list[Any] = []
 
     for message in messages:
@@ -831,7 +1048,12 @@ def _strip_empty_thinking_blocks_from_messages(messages: Iterable[Any]) -> list[
             continue
 
         filtered_content = [
-            block for block in content if not _is_empty_thinking_block(block)
+            block
+            for block in content
+            if _keep_thinking_block_for_target(
+                block,
+                target_is_chatgpt=target_is_chatgpt,
+            )
         ]
         if not filtered_content:
             continue
@@ -875,7 +1097,10 @@ def _strip_empty_web_search_domain_filters_from_tools(tools: Iterable[Any]) -> l
 def _sanitize_anthropic_messages_request(data: dict) -> None:
     messages = data.get("messages")
     if isinstance(messages, list):
-        data["messages"] = _strip_empty_thinking_blocks_from_messages(messages)
+        data["messages"] = _sanitize_thinking_blocks_for_target(
+            messages,
+            target_is_chatgpt=_is_chatgpt_request(data),
+        )
 
     tools = data.get("tools")
     if isinstance(tools, list):
@@ -909,6 +1134,34 @@ def _ensure_openai_web_search_sources_included(
         return
 
     data["include"] = [include, _OPENAI_WEB_SEARCH_SOURCES_INCLUDE]
+
+
+def _ensure_openai_reasoning_replay_enabled(
+    data: dict[str, Any],
+    model: str | None = None,
+) -> None:
+    if not _is_chatgpt_request(data, model=model):
+        return
+
+    include = data.get("include")
+    if include is None:
+        data["include"] = [_OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE]
+    elif isinstance(include, list):
+        if _OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE not in include:
+            data["include"] = [
+                *include,
+                _OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE,
+            ]
+    else:
+        data["include"] = [
+            include,
+            _OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE,
+        ]
+
+    # The replay item carried through Claude Code is the continuation state.
+    # Keep the upstream request stateless so this path does not depend on a
+    # server-side response object surviving between tool turns.
+    data["store"] = False
 
 
 def _is_chatgpt_request(data: dict, model: str | None = None) -> bool:
@@ -1043,7 +1296,7 @@ class ChatGPTAnthropicMessagesPatch(CustomLogger):
         self.enabled = _enable_patches()
         print(
             "[litellm] enabled Anthropic /v1/messages -> Responses routing "
-            "and effort mapping for chatgpt provider"
+            "with reasoning replay and effort mapping for chatgpt provider"
         )
 
     async def async_pre_request_hook(
@@ -1053,6 +1306,7 @@ class ChatGPTAnthropicMessagesPatch(CustomLogger):
         kwargs: dict,
     ) -> dict:
         _enable_patches()
+        _ensure_openai_reasoning_replay_enabled(kwargs, model=model)
         _ensure_openai_web_search_sources_included(kwargs, model=model)
         _apply_chatgpt_effort(kwargs, model=model)
         _apply_chatgpt_fast_mode(kwargs, model=model)
@@ -1067,6 +1321,7 @@ class ChatGPTAnthropicMessagesPatch(CustomLogger):
     ) -> dict:
         _enable_patches()
         _sanitize_anthropic_messages_request(data)
+        _ensure_openai_reasoning_replay_enabled(data)
         _ensure_openai_web_search_sources_included(data)
         if call_type == "anthropic_messages":
             _append_non_claude_models_note_to_system(data)
