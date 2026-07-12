@@ -203,8 +203,10 @@ structured output は **Codex/ChatGPT 経路で常に失敗するわけではあ
 - Anthropic の top-level `system` を Responses の `instructions` に写す
 - Codex alias の `/effort` を Responses `reasoning.effort` に写す
 - Responses の `reasoning.encrypted_content` を `thinking.signature` に退避し、次の tool turn で `reasoning` item として再送する
-- reasoning replay は `gpt#` marker 付き signature だけを対象にし、同じ会話に残る native Claude の thinking signature は Codex upstream へ送らない
-- Claude / Codex を同じ会話で切り替えた時に残る空 `thinking` block を落とす
+- reasoning replay は検証済みの `gpt#` marker 付き signature だけを対象にし、壊れた値や過大な値は再生しない
+- Codex 向け request では native Claude の `thinking` / `redacted_thinking` を除去し、Claude 向け request では `gpt#` thinking を除去する
+- Claude の署名付き `thinking` は本文が空でも未変更で保持し、model 切替後の tool loop を壊さない
+- reasoning / text / tool use を元の block 順で Responses item に変換する
 - Anthropic `web_search_*` tool を OpenAI Responses `web_search` tool へ変換する
 - OpenAI `web_search_call` / `url_citation` を Anthropic の `server_tool_use` / `web_search_tool_result` / `citations` へ戻す
 - Claude の system prompt 末尾に、gateway で使える非 Claude alias を XML 風 note として追記する
