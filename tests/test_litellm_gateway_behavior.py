@@ -3,7 +3,6 @@ import importlib
 import json
 import os
 import sys
-import tomllib
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar
@@ -19,7 +18,6 @@ CONFIG_PATH = ROOT / "litellm_config.max-codex-subscriptions.yaml"
 START_SCRIPT_PATH = ROOT / "scripts" / "start-litellm-max-codex-gateway.ps1"
 TEST_SCRIPT_PATH = ROOT / "scripts" / "test-litellm-max-codex-gateway.ps1"
 CLAUDE_CODE_SETTINGS_EXAMPLE_PATH = ROOT / "examples" / "claude-code-settings.json"
-CODEX_CONTEXT_BUDGET_EXAMPLE_PATH = ROOT / "examples" / "codex-context-budget.toml"
 PATCH_MODULE_NAME = "litellm_callbacks.chatgpt_anthropic_messages"
 MISSING = object()
 PATCH_ENV_VARS = (
@@ -150,18 +148,6 @@ class GatewayConfigTests(unittest.TestCase):
         self.assertEqual(model_info["max_input_tokens"], 272000)
         self.assertEqual(model_info["max_output_tokens"], 128000)
         self.assertEqual(model_info["max_tokens"], 128000)
-
-    def test_codex_cli_context_budget_example_keeps_32k_headroom(self) -> None:
-        with CODEX_CONTEXT_BUDGET_EXAMPLE_PATH.open("rb") as handle:
-            config = tomllib.load(handle)
-
-        self.assertEqual(config["model_context_window"], 272000)
-        self.assertEqual(config["model_auto_compact_token_limit"], 240000)
-        self.assertEqual(
-            config["model_context_window"]
-            - config["model_auto_compact_token_limit"],
-            32000,
-        )
 
     def test_client_authorization_header_is_not_forwarded_to_chatgpt(self) -> None:
         config = load_config()

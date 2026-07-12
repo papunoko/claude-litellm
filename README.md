@@ -156,21 +156,19 @@ curl.exe -s -H "x-litellm-api-key: Bearer $env:LITELLM_MASTER_KEY" http://localh
 
 **運用側の注意（重要）**: メイン会話は auto-compact されますが、Claude Code の **subagent（Task/Agent worker）は基本 compact されず、context を超えると 400 で即死** します。したがって subagent を長く回す設計そのものを避けるのが本筋です。dynamic-workflow skill 側で「subagent の戻り値はメタデータのみ（本文はファイルへ）」「下流に配る土台情報は 70 行以内」「出力行数・トークン上限を必ず指定」を守ると、この 400 はほぼ消えます。詳細は `~/.claude/skills/dynamic-workflow`（`references/failure-modes.md` の context-loss 節、`references/multi-model.md`）を参照。
 
-### Codex CLI 側の 272K / 240K 設定
+### Codex CLI 側は既定context / compactionを使う
 
-LiteLLM の `model_info.max_input_tokens` と、Codex CLI の `~/.codex/config.toml` は別の設定です。GPT-5.6 Codex CLI を直接使う場合は、[examples/codex-context-budget.toml](examples/codex-context-budget.toml) の次の値を既存 config へマージします。
+LiteLLM の `model_info.max_input_tokens` と、Codex CLI の `~/.codex/config.toml` は別の設定です。GPT-5.6 Codex CLIでは、次の手動overrideを既定設定として追加しません。
 
 ```toml
-model_context_window = 272000
-model_auto_compact_token_limit = 240000
+# 通常は設定しない
+# model_context_window = 272000
+# model_auto_compact_token_limit = 240000
 ```
 
-- `272000`: 272K超のlong-context料金帯を避けるための上限。投稿元: [@yoppy0123, 2026-07-12](https://x.com/yoppy0123/status/2076098063178076285)
-- `240000`: 現turn、tool結果、reasoning、output用に32Kの余白を残してcompactを始める閾値
+当初は272K超の料金帯を避ける案として紹介されていましたが、OpenAI Codex/ChatGPTチームの[@thsottiauxによる訂正（2026-07-12）](https://x.com/thsottiaux/status/2076201049086648705)では、Codexの利用枠では270K超に追加課金せず、GPT-5.6 Solの既定context thresholdは調整済みとされています。したがってこのrepoでは、task固有の計測根拠がない限りCodex既定値を使います。
 
-これは「token生成量を必ず減らす」設定ではなく、**利用枠の急増を避けるために早めのcompactionを受け入れる設定**です。早いcompactionには、過去の要件・ログ・却下案のdetailが落ちる、再読や手戻りが増える、大規模repoや長いdiffで整合性を維持しづらくなる、というtrade-offがあります。長文作業では重要な制約をrepo内planやartifactへ退避し、compaction後に再読できる形にしてください。
-
-Claude Code→LiteLLM経路ではこのCodex CLI設定ファイルは参照されません。そちらの入力会計は引き続き`litellm_config.max-codex-subscriptions.yaml`の`max_input_tokens: 272000`で制御します。
+Claude Code→LiteLLM経路では`~/.codex/config.toml`自体を参照しません。そちらの入力会計は、引き続き`litellm_config.max-codex-subscriptions.yaml`の実測済み`max_input_tokens: 272000`で制御します。これはCodex CLIのauto-compaction overrideとは別問題です。
 
 ## structured output が崩れる時（最終段の JSON）
 
