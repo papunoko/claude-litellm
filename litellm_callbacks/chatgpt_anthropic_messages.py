@@ -9,6 +9,7 @@ but LiteLLM 1.89.4 only enables the path for the `openai` provider. The official
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,6 +31,7 @@ _WEB_SEARCH_DOMAIN_FILTER_KEYS = ("allowed_domains", "blocked_domains")
 _OPENAI_WEB_SEARCH_SOURCES_INCLUDE = "web_search_call.action.sources"
 _OPENAI_REASONING_ENCRYPTED_CONTENT_INCLUDE = "reasoning.encrypted_content"
 _OPENAI_REASONING_SIGNATURE_PREFIX = "gpt#"
+_OPENAI_REASONING_SIGNATURE_MAX_LENGTH = 32 * 1024 * 1024
 
 
 def _enable_chatgpt_responses_route() -> bool:
@@ -186,12 +188,22 @@ def _get_value(value: Any, key: str, default: Any = None) -> Any:
 def _encode_openai_reasoning_signature(encrypted_content: Any) -> str | None:
     if not isinstance(encrypted_content, str) or not encrypted_content:
         return None
-    return f"{_OPENAI_REASONING_SIGNATURE_PREFIX}{encrypted_content}"
+    signature = f"{_OPENAI_REASONING_SIGNATURE_PREFIX}{encrypted_content}"
+    if len(signature) > _OPENAI_REASONING_SIGNATURE_MAX_LENGTH:
+        return None
+    return signature
+
+
+def _is_openai_reasoning_signature(signature: Any) -> bool:
+    return isinstance(signature, str) and signature.startswith(
+        _OPENAI_REASONING_SIGNATURE_PREFIX
+    )
 
 
 def _decode_openai_reasoning_signature(signature: Any) -> str | None:
-    if not isinstance(signature, str) or not signature.startswith(
-        _OPENAI_REASONING_SIGNATURE_PREFIX
+    if (
+        not _is_openai_reasoning_signature(signature)
+        or len(signature) > _OPENAI_REASONING_SIGNATURE_MAX_LENGTH
     ):
         return None
 
@@ -222,6 +234,83 @@ def _responses_reasoning_item_from_anthropic_block(
         "summary": summary,
         "encrypted_content": encrypted_content,
     }
+
+
+def _translate_message_segment(
+    original_translate_messages: Any,
+    adapter: Any,
+    message: dict[str, Any],
+    blocks: list[Any],
+) -> list[dict[str, Any]]:
+    if not blocks:
+        return []
+    return original_translate_messages(
+        adapter,
+        [{**message, "content": list(blocks)}],
+    )
+
+
+def _translate_assistant_message_in_order(
+    original_translate_messages: Any,
+    adapter: Any,
+    message: dict[str, Any],
+    content: list[Any],
+) -> list[dict[str, Any]]:
+    """Translate assistant blocks without moving text across tool calls."""
+    translated: list[dict[str, Any]] = []
+    text_segment: list[Any] = []
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+
+        block_type = block.get("type")
+        if block_type == "text":
+            text_segment.append(block)
+            continue
+
+        if text_segment:
+            translated.extend(
+                _translate_message_segment(
+                    original_translate_messages,
+                    adapter,
+                    message,
+                    text_segment,
+                )
+            )
+            text_segment.clear()
+
+        if block_type == "thinking":
+            reasoning_item = _responses_reasoning_item_from_anthropic_block(block)
+            if reasoning_item is not None:
+                translated.append(reasoning_item)
+            # Native Claude thinking must never become GPT assistant text.
+            continue
+
+        if block_type == "redacted_thinking":
+            # Redacted Claude thinking is provider-owned opaque state too.
+            continue
+
+        translated.extend(
+            _translate_message_segment(
+                original_translate_messages,
+                adapter,
+                message,
+                [block],
+            )
+        )
+
+    if text_segment:
+        translated.extend(
+            _translate_message_segment(
+                original_translate_messages,
+                adapter,
+                message,
+                text_segment,
+            )
+        )
+
+    return translated
 
 
 def _response_output_items(response: Any) -> list[Any]:
@@ -467,8 +556,6 @@ def _translate_responses_api_response_with_web_search(
                     block["citations"] = citations
                 content.append(block)
         elif item_type == "function_call":
-            import json
-
             arguments = _get_value(item, "arguments", "{}")
             try:
                 input_data = json.loads(arguments) if arguments else {}
@@ -580,31 +667,14 @@ def _patch_responses_web_search_translation() -> bool:
                     translated.extend(original_translate_messages(self, [message]))
                     continue
 
-                segment: list[Any] = []
-
-                def flush_segment() -> None:
-                    if not segment:
-                        return
-                    segment_message = {**message, "content": list(segment)}
-                    translated.extend(
-                        original_translate_messages(self, [segment_message])
+                translated.extend(
+                    _translate_assistant_message_in_order(
+                        original_translate_messages,
+                        self,
+                        message,
+                        content,
                     )
-                    segment.clear()
-
-                for block in content:
-                    reasoning_item = (
-                        _responses_reasoning_item_from_anthropic_block(block)
-                        if isinstance(block, dict) and block.get("type") == "thinking"
-                        else None
-                    )
-                    if reasoning_item is None:
-                        segment.append(block)
-                        continue
-
-                    flush_segment()
-                    translated.append(reasoning_item)
-
-                flush_segment()
+                )
 
             return translated
 
@@ -766,22 +836,37 @@ def _enable_patches() -> bool:
     return True
 
 
-def _is_empty_thinking_block(block: Any) -> bool:
+def _keep_thinking_block_for_target(
+    block: Any,
+    *,
+    target_is_chatgpt: bool,
+) -> bool:
     if not isinstance(block, dict):
-        return False
+        return True
 
     block_type = block.get("type")
     if block_type == "thinking":
-        if _decode_openai_reasoning_signature(block.get("signature")) is not None:
+        signature = block.get("signature")
+        if target_is_chatgpt:
+            return _decode_openai_reasoning_signature(signature) is not None
+
+        # Synthetic GPT signatures are never valid Anthropic signatures,
+        # including malformed or oversized gateway-tagged values.
+        if _is_openai_reasoning_signature(signature):
             return False
+
         thinking = block.get("thinking")
-        return not isinstance(thinking, str) or thinking == ""
+        has_thinking = isinstance(thinking, str) and bool(thinking)
+        has_native_signature = isinstance(signature, str) and bool(signature)
+        return has_thinking or has_native_signature
 
     if block_type == "redacted_thinking":
+        if target_is_chatgpt:
+            return False
         data = block.get("data")
-        return not isinstance(data, str) or data == ""
+        return isinstance(data, str) and bool(data)
 
-    return False
+    return True
 
 
 def _split_model_names(value: str) -> tuple[str, ...]:
@@ -945,7 +1030,11 @@ def _append_non_claude_models_note_to_system(data: dict[str, Any]) -> None:
         data["system"] = note
 
 
-def _strip_empty_thinking_blocks_from_messages(messages: Iterable[Any]) -> list[Any]:
+def _sanitize_thinking_blocks_for_target(
+    messages: Iterable[Any],
+    *,
+    target_is_chatgpt: bool,
+) -> list[Any]:
     cleaned: list[Any] = []
 
     for message in messages:
@@ -959,7 +1048,12 @@ def _strip_empty_thinking_blocks_from_messages(messages: Iterable[Any]) -> list[
             continue
 
         filtered_content = [
-            block for block in content if not _is_empty_thinking_block(block)
+            block
+            for block in content
+            if _keep_thinking_block_for_target(
+                block,
+                target_is_chatgpt=target_is_chatgpt,
+            )
         ]
         if not filtered_content:
             continue
@@ -1003,7 +1097,10 @@ def _strip_empty_web_search_domain_filters_from_tools(tools: Iterable[Any]) -> l
 def _sanitize_anthropic_messages_request(data: dict) -> None:
     messages = data.get("messages")
     if isinstance(messages, list):
-        data["messages"] = _strip_empty_thinking_blocks_from_messages(messages)
+        data["messages"] = _sanitize_thinking_blocks_for_target(
+            messages,
+            target_is_chatgpt=_is_chatgpt_request(data),
+        )
 
     tools = data.get("tools")
     if isinstance(tools, list):
