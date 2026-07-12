@@ -449,7 +449,49 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             },
         )
 
-    def test_non_gpt_thinking_signature_is_not_replayed_to_openai(self) -> None:
+    def test_native_claude_thinking_is_not_sent_to_openai_as_text(self) -> None:
+        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
+            LiteLLMAnthropicToResponsesAPIAdapter,
+        )
+
+        translated = (
+            LiteLLMAnthropicToResponsesAPIAdapter()
+            .translate_messages_to_responses_input(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "before"},
+                            {
+                                "type": "thinking",
+                                "thinking": "SECRET_NATIVE_CLAUDE_THOUGHT",
+                                "signature": "native-claude-signature",
+                            },
+                            {
+                                "type": "redacted_thinking",
+                                "data": "opaque-native-claude-state",
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "call_123",
+                                "name": "read_file",
+                                "input": {"path": "README.md"},
+                            },
+                            {"type": "text", "text": "after"},
+                        ],
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(
+            [item["type"] for item in translated],
+            ["message", "function_call", "message"],
+        )
+        self.assertFalse(any(item["type"] == "reasoning" for item in translated))
+        self.assertNotIn("SECRET_NATIVE_CLAUDE_THOUGHT", json.dumps(translated))
+
+    def test_interleaved_assistant_blocks_keep_responses_item_order(self) -> None:
         from litellm.llms.anthropic.experimental_pass_through.responses_adapters.transformation import (
             LiteLLMAnthropicToResponsesAPIAdapter,
         )
@@ -463,17 +505,37 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                         "content": [
                             {
                                 "type": "thinking",
-                                "thinking": "Native Claude thought",
-                                "signature": "native-claude-signature",
-                            }
+                                "thinking": "plan",
+                                "signature": "gpt#encrypted-state",
+                            },
+                            {"type": "text", "text": "before"},
+                            {
+                                "type": "tool_use",
+                                "id": "call_1",
+                                "name": "first_tool",
+                                "input": {"value": 1},
+                            },
+                            {"type": "text", "text": "after"},
+                            {
+                                "type": "tool_use",
+                                "id": "call_2",
+                                "name": "second_tool",
+                                "input": {"value": 2},
+                            },
                         ],
                     }
                 ]
             )
         )
 
-        self.assertEqual(translated[0]["type"], "message")
-        self.assertFalse(any(item["type"] == "reasoning" for item in translated))
+        self.assertEqual(
+            [item["type"] for item in translated],
+            ["reasoning", "message", "function_call", "message", "function_call"],
+        )
+        self.assertEqual(translated[1]["content"][0]["text"], "before")
+        self.assertEqual(translated[2]["call_id"], "call_1")
+        self.assertEqual(translated[3]["content"][0]["text"], "after")
+        self.assertEqual(translated[4]["call_id"], "call_2")
 
     def test_max_effort_maps_to_xhigh_for_codex_alias(self) -> None:
         data = {
@@ -738,7 +800,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             self.patch._is_chatgpt_request({"model": "claude-chatgpt-gpt-5-4"})
         )
 
-    def test_empty_thinking_blocks_are_removed_but_valid_blocks_remain(self) -> None:
+    def test_claude_target_drops_gpt_state_and_preserves_native_state(self) -> None:
         messages = [
             {"role": "user", "content": "hi"},
             {
@@ -753,8 +815,12 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                 "content": [
                     {
                         "type": "thinking",
-                        "thinking": "valid",
-                        "signature": "sig",
+                        "thinking": "",
+                        "signature": "native-claude-omitted-signature",
+                    },
+                    {
+                        "type": "redacted_thinking",
+                        "data": "native-redacted-state",
                     }
                 ],
             },
@@ -774,7 +840,10 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             },
         ]
 
-        cleaned = self.patch._strip_empty_thinking_blocks_from_messages(messages)
+        cleaned = self.patch._sanitize_thinking_blocks_for_target(
+            messages,
+            target_is_chatgpt=False,
+        )
 
         self.assertEqual(
             cleaned,
@@ -789,23 +858,173 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "thinking",
-                            "thinking": "valid",
-                            "signature": "sig",
-                        }
+                            "thinking": "",
+                            "signature": "native-claude-omitted-signature",
+                        },
+                        {
+                            "type": "redacted_thinking",
+                            "data": "native-redacted-state",
+                        },
                     ],
                 },
+            ],
+        )
+
+    def test_chatgpt_target_keeps_only_gateway_reasoning_state(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "native secret",
+                        "signature": "native-claude-signature",
+                    },
+                    {
+                        "type": "thinking",
+                        "thinking": "",
+                        "signature": "native-claude-omitted-signature",
+                    },
+                    {
+                        "type": "redacted_thinking",
+                        "data": "native-redacted-state",
+                    },
+                    {
+                        "type": "thinking",
+                        "thinking": "GPT plan",
+                        "signature": "gpt#encrypted-turn-state",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    },
+                ],
+            }
+        ]
+
+        cleaned = self.patch._sanitize_thinking_blocks_for_target(
+            messages,
+            target_is_chatgpt=True,
+        )
+
+        self.assertEqual(
+            cleaned[0]["content"],
+            [
+                {
+                    "type": "thinking",
+                    "thinking": "GPT plan",
+                    "signature": "gpt#encrypted-turn-state",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_123",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
+            ],
+        )
+
+    def test_pre_call_hook_filters_thinking_for_each_provider(self) -> None:
+        claude_data = {
+            "model": "claude-opus-4-8",
+            "messages": [
                 {
                     "role": "assistant",
                     "content": [
                         {
                             "type": "thinking",
                             "thinking": "",
-                            "signature": "gpt#encrypted-without-summary",
-                        }
+                            "signature": "gpt#encrypted-turn-state",
+                        },
+                        {
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": "native-claude-signature",
+                        },
                     ],
-                },
+                }
+            ],
+        }
+        codex_data = {
+            "model": "claude-codex-gpt-5-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "native secret",
+                            "signature": "native-claude-signature",
+                        },
+                        {
+                            "type": "thinking",
+                            "thinking": "GPT plan",
+                            "signature": "gpt#encrypted-turn-state",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        for data in (claude_data, codex_data):
+            asyncio.run(
+                self.patch.proxy_handler_instance.async_pre_call_hook(
+                    None,
+                    None,
+                    data,
+                    "anthropic_messages",
+                )
+            )
+
+        self.assertEqual(
+            claude_data["messages"][0]["content"],
+            [
+                {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "native-claude-signature",
+                }
             ],
         )
+        self.assertEqual(
+            codex_data["messages"][0]["content"],
+            [
+                {
+                    "type": "thinking",
+                    "thinking": "GPT plan",
+                    "signature": "gpt#encrypted-turn-state",
+                }
+            ],
+        )
+
+    def test_invalid_or_oversized_gateway_signature_is_dropped(self) -> None:
+        original_limit = self.patch._OPENAI_REASONING_SIGNATURE_MAX_LENGTH
+        self.patch._OPENAI_REASONING_SIGNATURE_MAX_LENGTH = 12
+        try:
+            self.assertIsNone(self.patch._decode_openai_reasoning_signature("gpt#"))
+            self.assertIsNone(
+                self.patch._decode_openai_reasoning_signature("gpt#123456789")
+            )
+            cleaned = self.patch._sanitize_thinking_blocks_for_target(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "",
+                                "signature": "gpt#123456789",
+                            }
+                        ],
+                    }
+                ],
+                target_is_chatgpt=True,
+            )
+            self.assertEqual(cleaned, [])
+        finally:
+            self.patch._OPENAI_REASONING_SIGNATURE_MAX_LENGTH = original_limit
 
     def test_empty_web_search_domain_filters_are_removed(self) -> None:
         data = {
