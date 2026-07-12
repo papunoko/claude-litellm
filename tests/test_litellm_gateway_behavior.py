@@ -999,7 +999,7 @@ class ChatGPTAnthropicMessagesPatchTests(unittest.TestCase):
             ],
         )
 
-    def test_invalid_or_oversized_gateway_signature_is_dropped(self) -> None:
+    def test_empty_or_oversized_gateway_signature_is_dropped(self) -> None:
         original_limit = self.patch._OPENAI_REASONING_SIGNATURE_MAX_LENGTH
         self.patch._OPENAI_REASONING_SIGNATURE_MAX_LENGTH = 12
         try:
